@@ -16,7 +16,7 @@ const serverlessConfiguration: AWS = {
       GOOGLE_SERVICE_ACCOUNT_EMAIL: '${env:GOOGLE_SERVICE_ACCOUNT_EMAIL}',
       GOOGLE_PRIVATE_KEY: '${env:GOOGLE_PRIVATE_KEY}',
       S3_BUCKET: '${env:S3_BUCKET}',
-      AWS_REGION: '${env:REGION}'
+      REGION: '${env:REGION}'
     },
     apiGateway: {
       binaryMediaTypes: ['multipart/form-data', 'application/octet-stream', 'image/*']

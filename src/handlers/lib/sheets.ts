@@ -35,6 +35,7 @@ async function getAuthenticatedSheetsClient() {
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   })
 
+  // @ts-expect-error - auth is not typed correctly
   const sheets = google.sheets({ version: 'v4', auth })
   return sheets
 }
@@ -130,9 +131,24 @@ function formatEventForSpreadsheet(event: Event, s3Url: string): FormattedEventR
 }
 
 // Add events to Google Spreadsheet
-export async function addEventsToSpreadsheet(events: Event[], s3Url?: string): Promise<void> {
-  if (!events.length) {
-    console.log('No events to add to spreadsheet')
+export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[]; s3Url?: string }>): Promise<void> {
+  if (!eventGroups.length) {
+    console.log('No event groups to add to spreadsheet')
+    return
+  }
+
+  // Flatten all events from all groups
+  const allFormattedEvents: FormattedEventRow[] = []
+
+  for (const group of eventGroups) {
+    if (!group.events.length) continue
+
+    const formattedEvents = group.events.map(event => formatEventForSpreadsheet(event, group.s3Url || ''))
+    allFormattedEvents.push(...formattedEvents)
+  }
+
+  if (!allFormattedEvents.length) {
+    console.log('No events to add to spreadsheet after processing')
     return
   }
 
@@ -143,11 +159,8 @@ export async function addEventsToSpreadsheet(events: Event[], s3Url?: string): P
 
   const sheets = await getAuthenticatedSheetsClient()
 
-  // Format events for spreadsheet
-  const formattedEvents = events.map(event => formatEventForSpreadsheet(event, s3Url || ''))
-
   // Convert to array of arrays for batch insert
-  const rows = formattedEvents.map(event => [
+  const rows = allFormattedEvents.map(event => [
     event.date,
     event.eventName,
     event.type,
@@ -174,44 +187,6 @@ export async function addEventsToSpreadsheet(events: Event[], s3Url?: string): P
     console.log(`Successfully added ${rows.length} events to spreadsheet. Updated range: ${result.data.updates?.updatedRange}`)
   } catch (error) {
     console.error('Error adding events to spreadsheet:', error)
-    throw error
-  }
-}
-
-// Create headers if needed (call this once to set up the spreadsheet)
-export async function createSpreadsheetHeaders(): Promise<void> {
-  const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID
-  if (!spreadsheetId) {
-    throw new Error('GOOGLE_SPREADSHEET_ID environment variable not set')
-  }
-
-  const sheets = await getAuthenticatedSheetsClient()
-
-  const headers = ['Date', 'Event Name', 'Type', 'Start Time', 'End Time', 'Location', 'Address', 'Description', 'Cost', 'Link']
-
-  try {
-    // Check if headers already exist
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: 'A1:J1'
-    })
-
-    // If first row is empty, add headers
-    if (!response.data.values || response.data.values.length === 0 || response.data.values[0].length === 0) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: 'A1:J1',
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [headers]
-        }
-      })
-      console.log('Headers added to spreadsheet')
-    } else {
-      console.log('Headers already exist in spreadsheet')
-    }
-  } catch (error) {
-    console.error('Error creating spreadsheet headers:', error)
     throw error
   }
 }

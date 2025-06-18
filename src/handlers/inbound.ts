@@ -4,6 +4,19 @@ import { extractEvents } from './lib/openai'
 import { uploadToS3 } from './lib/s3'
 import { addEventsToSpreadsheet } from './lib/sheets'
 
+interface Event {
+  title: string
+  address: string
+  location: string
+  type: string
+  startDay: string | null
+  startTime: string | null
+  description: string
+  cost: string | null
+  endDay: string | null
+  endTime: string | null
+}
+
 interface ParsedAttachment {
   filename: string
   contentType: string
@@ -30,6 +43,7 @@ interface ParsedEmail {
 export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promise<APIGatewayProxyResult> => {
   console.log('Received event:', JSON.stringify({ ...event, body: event.body ? 'body present' : 'no body' }, null, 2))
   let successCount = 0
+  const allEvents: Array<{ events: Event[]; s3Url?: string }> = []
 
   try {
     if (!event.body) {
@@ -97,7 +111,7 @@ export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promi
             console.log(`Extracted events from attachment ${parsedAttachment.filename}:`, events)
 
             if (events.events?.length > 0) {
-              await addEventsToSpreadsheet(events.events, parsedAttachment.s3Url)
+              allEvents.push({ events: events.events, s3Url: parsedAttachment.s3Url })
               successCount++
             }
           } catch (error) {
@@ -111,10 +125,15 @@ export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promi
       emailData.attachments.push(...processedAttachments)
     }
 
+    // Add all collected events to the spreadsheet in one batch
+    if (allEvents.length > 0) {
+      console.log(`Adding ${allEvents.length} event groups to spreadsheet`)
+      await addEventsToSpreadsheet(allEvents)
+    }
+
     // Log summary of parsed email
     console.log('Parsed email summary:', { parsedData, emailData })
-
-    console.log(`Successfully added ${successCount} events to Google Spreadsheet`)
+    console.log(`Successfully processed ${successCount} attachments with events`, {events: allEvents})
     return { statusCode: 200, body: JSON.stringify({ message: 'Email parsed successfully' }) }
   } catch (error) {
     console.error('Error parsing inbound email:', error)

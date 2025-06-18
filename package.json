@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "check": "pnpm tsc --noEmit",
     "lint": "biome check ./ --fix",
     "dev": "nodemon",
     "deploy:prod": "pnpm serverless deploy"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.830.0",
+    "date-fns": "^4.1.0",
     "google-auth-library": "^10.1.0",
     "googleapis": "^144.0.0",
     "lambda-multipart-parser": "^1.0.1",
