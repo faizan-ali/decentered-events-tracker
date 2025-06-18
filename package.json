@@ -1,0 +1,31 @@
+{
+  "name": "calendify-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "lint": "biome check ./ --fix",
+    "dev": "nodemon",
+    "deploy:prod": "pnpm serverless deploy"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.830.0",
+    "google-auth-library": "^10.1.0",
+    "googleapis": "^144.0.0",
+    "lambda-multipart-parser": "^1.0.1",
+    "openai": "^4.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@serverless/typescript": "^3.38.0",
+    "@types/aws-lambda": "^8.10.0",
+    "@types/node": "^22.13.1",
+    "dotenv": "^16.5.0",
+    "nodemon": "^3.1.9",
+    "serverless": "4.4.16",
+    "serverless-dotenv-plugin": "^6.0.0",
+    "serverless-offline": "^14.4.0",
+    "tsconfig-paths": "^4.2.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.0.0"
+  }
+}
