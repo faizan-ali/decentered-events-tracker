@@ -37,8 +37,7 @@ export async function extractEvents(imageBuffer: Buffer, fileType: string): Prom
         ]
       }
     ],
-    response_format: { type: 'json_object' },
-    max_tokens: 1000
+    response_format: { type: 'json_object' }
   })
 
   const result = JSON.parse(response.choices[0].message.content!) as GPTResponse

@@ -6,7 +6,7 @@ Required Fields (use null if unavailable):
 - location (string): The city or geographical area. Must be one of: San Francisco, Oakland, Berkeley, Other
 - type (string): The type of event. Must be one of: Multi Media, Music, Visual Art, Theater, Poetry/Lit, Meetup, Dance, Workshop, Open Mic, Film, Lecture, Drag, Festival, Market, Party, Sound Bath, Clothing Swap, Food/Bev, Something Else, Fashion Show, Comedy
 - startDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no date is found. Set the year to 2025 if not specified.
-- startTime (string | null): ISO time format (HH:mm:ss). Must be null if no time is found
+- startTime (string | null): In hours and minutes (HH:mm). Must be null if no time is found
 - description (string): A detailed decsription of the event, at minimum copied from the flyer.
 - cost (string | null): The cost of the event in dollars, or "Free". Must be null if no cost is found.
 
