@@ -92,11 +92,11 @@ function formatTime(timeString: string | null): string {
 
 // Format cost to $XX or Free
 function formatCost(costString: string | null): string {
-  if (!costString) return 'Free'
+  if (!costString) return 'Unknown'
 
   const cost = costString.toLowerCase().trim()
 
-  if (cost === 'free' || cost === '0' || cost === '$0') {
+  if (cost.includes('free')|| cost === '0' || cost === '$0') {
     return 'Free'
   }
 
@@ -111,7 +111,7 @@ function formatCost(costString: string | null): string {
     return `$${numMatch[1]}`
   }
 
-  return costString || 'Free'
+  return costString || 'Unknown'
 }
 
 // Convert event to spreadsheet row format
@@ -133,7 +133,7 @@ function formatEventForSpreadsheet(event: Event, s3Url: string): FormattedEventR
 // Add events to Google Spreadsheet
 export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[]; s3Url?: string }>): Promise<void> {
   if (!eventGroups.length) {
-    console.log('No event groups to add to spreadsheet')
+    console.log('No events to add to spreadsheet')
     return
   }
 

@@ -8,7 +8,7 @@ Required Fields (use null if unavailable):
 - startDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no date is found. Set the year to 2025 if not specified.
 - startTime (string | null): In hours and minutes (HH:mm). Must be null if no time is found
 - description (string): A detailed decsription of the event, at minimum copied from the flyer.
-- cost (string | null): The cost of the event in dollars, or "Free". Must be null if no cost is found.
+- cost (string | null): The cost of the event in dollars, or "Free" ONLY if it is explicitly stated. Must be null if no cost is found.
 
 Optional Fields (use null if unavailable):
 - endDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no end date is found. Set the year to 2025 if not specified.

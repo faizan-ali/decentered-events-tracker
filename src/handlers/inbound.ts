@@ -37,15 +37,8 @@ export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promi
     let eventToProcess = event
 
     if (event.isBase64Encoded && event.body) {
-      console.log('Detected base64-encoded body, decoding...')
-      console.log(`Original body size (base64): ${event.body.length} characters`)
       const decodedBody = Buffer.from(event.body, 'base64').toString('binary')
-      console.log(`Decoded body size: ${decodedBody.length} bytes`)
-      eventToProcess = {
-        ...event,
-        body: decodedBody,
-        isBase64Encoded: false
-      }
+      eventToProcess = { ...event, body: decodedBody, isBase64Encoded: false }
     }
 
     // Parse the multipart form data
@@ -58,7 +51,7 @@ export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promi
       subject: parsedData.subject || '',
       text: parsedData.text,
       html: parsedData.html,
-      attachments: [],
+      attachments: []
     }
 
     if (!parsedData.files?.length) {
@@ -105,9 +98,7 @@ export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promi
 
     emailData.attachments.push(...processedAttachments)
 
-    // Add all collected events to the spreadsheet in one batch
     if (allEvents.length > 0) {
-      console.log(`Adding ${allEvents.length} event groups to spreadsheet`)
       await addEventsToSpreadsheet(allEvents)
     }
 
