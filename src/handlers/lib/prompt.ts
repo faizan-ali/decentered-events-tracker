@@ -5,13 +5,13 @@ Required Fields (use null if unavailable):
 - address (string): Physical address, or indicate virtual status ("Virtual", "Remote", "Zoom", or "Online")
 - location (string): The city or geographical area. Must be one of: San Francisco, Oakland, Berkeley, Other
 - type (string): The type of event. Must be one of: Multi Media, Music, Visual Art, Theater, Poetry/Lit, Meetup, Dance, Workshop, Open Mic, Film, Lecture, Drag, Festival, Market, Party, Sound Bath, Clothing Swap, Food/Bev, Something Else, Fashion Show, Comedy
-- startDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no date is found. Set the year to 2025 if not specified.
+- startDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no date is found. Set the year to 2026 if not specified.
 - startTime (string | null): In hours and minutes (HH:mm). Must be null if no time is found
 - description (string): A detailed decsription of the event, at minimum copied from the flyer.
 - cost (string | null): The cost of the event in dollars, or "Free" ONLY if it is explicitly stated. Must be null if no cost is found.
 
 Optional Fields (use null if unavailable):
-- endDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no end date is found. Set the year to 2025 if not specified.
+- endDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no end date is found. Set the year to 2026 if not specified.
 - endTime (string | null): ISO time format (HH:mm:ss)
 
 Special Cases:
@@ -21,7 +21,7 @@ Special Cases:
 - Multi-venue events: List all venues, separated by " | "
 - All-day events: Use null for startTime and endTime
 - Multi-day events: Include both startDay and endDay
-- Dates: Never infer or guess dates - if not explicitly stated, use null. 
+- Dates: Never infer or guess dates - if not explicitly stated, use null.
 
 Output Format:
 {

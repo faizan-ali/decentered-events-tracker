@@ -1,7 +1,7 @@
 import { JWT } from 'google-auth-library'
 import { google } from 'googleapis'
 
-interface Event {
+export interface Event {
   title: string
   address: string
   location: string
@@ -14,7 +14,7 @@ interface Event {
   endTime: string | null
 }
 
-interface FormattedEventRow {
+export interface FormattedEventRow {
   date: string
   eventName: string
   type: string
@@ -41,7 +41,7 @@ async function getAuthenticatedSheetsClient() {
 }
 
 // Format date from YYYY-MM-DD or similar to MM/DD/YYYY
-function formatDate(dateString: string | null): string {
+export function formatDate(dateString: string | null): string {
   if (!dateString) return ''
 
   try {
@@ -59,7 +59,7 @@ function formatDate(dateString: string | null): string {
 }
 
 // Format time to HH:MM AM/PM
-function formatTime(timeString: string | null): string {
+export function formatTime(timeString: string | null): string {
   if (!timeString) return ''
 
   try {
@@ -91,7 +91,7 @@ function formatTime(timeString: string | null): string {
 }
 
 // Format cost to $XX or Free
-function formatCost(costString: string | null): string {
+export function formatCost(costString: string | null): string {
   if (!costString) return 'Unknown'
 
   const cost = costString.toLowerCase().trim()
@@ -115,7 +115,7 @@ function formatCost(costString: string | null): string {
 }
 
 // Convert event to spreadsheet row format
-function formatEventForSpreadsheet(event: Event, s3Url: string): FormattedEventRow {
+export function formatEventForSpreadsheet(event: Event, s3Url: string): FormattedEventRow {
   return {
     date: formatDate(event.startDay),
     eventName: event.title || '',
