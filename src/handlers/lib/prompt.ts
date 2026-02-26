@@ -1,29 +1,30 @@
-export const PROMPT = `You are an expert event extractor. Given the attached image of a flyer, extract all event details as a JSON array.
+export const PROMPT = `Extract ALL events from this image. The image may be a flyer, poster, social media post, screenshot, or any format containing event information.
 
-Required Fields (use null if unavailable):
-- title (string): Main event title, excluding date/time/location
-- address (string): Physical address, or indicate virtual status ("Virtual", "Remote", "Zoom", or "Online")
-- location (string): The city or geographical area. Must be one of: San Francisco, Oakland, Berkeley, Other
-- type (string): The type of event. Must be one of: Multi Media, Music, Visual Art, Theater, Poetry/Lit, Meetup, Dance, Workshop, Open Mic, Film, Lecture, Drag, Festival, Market, Party, Sound Bath, Clothing Swap, Food/Bev, Something Else, Fashion Show, Comedy
-- startDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no date is found. Set the year to 2026 if not specified.
-- startTime (string | null): In hours and minutes (HH:mm). Must be null if no time is found
-- description (string): A detailed decsription of the event, at minimum copied from the flyer.
-- cost (string | null): The cost of the event in dollars, or "Free" ONLY if it is explicitly stated. Must be null if no cost is found.
+CRITICAL: If the image lists multiple events (e.g. a workshop series, a lineup, a calendar), extract EVERY event as a separate entry. Do not summarize or collapse them.
 
-Optional Fields (use null if unavailable):
-- endDay (string | null): ISO date format (YYYY-MM-DD). Must be null if no end date is found. Set the year to 2026 if not specified.
-- endTime (string | null): ISO time format (HH:mm:ss)
+For each event, return these fields:
 
-Special Cases:
-- Virtual events: Recognize various indicators ("Virtual", "Remote", "Zoom", "Online", "Webinar") and standardize in location field as "Virtual"
-- Recurring events: Extract only the next occurrence
-- Hybrid events: Include both physical and virtual locations, separated by " & "
-- Multi-venue events: List all venues, separated by " | "
-- All-day events: Use null for startTime and endTime
-- Multi-day events: Include both startDay and endDay
-- Dates: Never infer or guess dates - if not explicitly stated, use null.
+- title (string): Event name only, no dates/times/locations
+- address (string): Physical address or venue name. For virtual events use "Virtual"
+- location (string): One of: San Francisco, Oakland, Berkeley, Other
+- type (string): One of: Multi Media, Music, Visual Art, Theater, Poetry/Lit, Meetup, Dance, Workshop, Open Mic, Film, Lecture, Drag, Festival, Market, Party, Sound Bath, Clothing Swap, Food/Bev, Something Else, Fashion Show, Comedy
+- startDay (string | null): YYYY-MM-DD format. Assume year 2026 if not specified. null if no date found
+- endDay (string | null): YYYY-MM-DD format. Assume year 2026 if not specified. null if no end date found
+- startTime (string | null): HH:mm 24-hour format. null if no time found
+- endTime (string | null): HH:mm 24-hour format. null if no end time found
+- description (string): A description specific to this individual event. Include relevant details from the image but tailor it to this specific event
+- cost (string | null): Dollar amount or "Free" ONLY if explicitly stated. null if not mentioned
 
-Output Format:
+Rules:
+- Never infer or guess dates. If not explicitly stated, use null
+- Hybrid events: combine locations with " & "
+- Multi-venue events: separate with " | "
+- All-day events: null for startTime and endTime
+- Multi-day events: set both startDay and endDay
+- Recurring events with no distinct titles (e.g. "Every Tuesday at 7pm"): extract only the next occurrence
+- A series of events with distinct names or dates: extract ALL of them individually
+
+Return valid JSON:
 {
     "events": [
         {
@@ -32,13 +33,14 @@ Output Format:
             "location": string,
             "type": string,
             "startDay": string | null,
+            "endDay": string | null,
             "startTime": string | null,
+            "endTime": string | null,
             "description": string,
             "cost": string | null
-        },
-        ...
+        }
     ]
 }
 
-Return only valid JSON. If no events are found, return {"events": []}.
+If no events are found, return {"events": []}.
 `

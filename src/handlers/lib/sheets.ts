@@ -130,6 +130,37 @@ export function formatEventForSpreadsheet(event: Event, s3Url: string): Formatte
   }
 }
 
+// Build a dedupe key from date (col A), event name (col B), and address (col G)
+function dedupeKey(date: string, eventName: string, address: string): string {
+  return `${date.toLowerCase().trim()}|${eventName.toLowerCase().trim()}|${address.toLowerCase().trim()}`
+}
+
+// Fetch existing dedupe keys from the spreadsheet
+async function getExistingEventKeys(sheets: any, spreadsheetId: string): Promise<Set<string>> {
+  const keys = new Set<string>()
+
+  try {
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: 'A:G'
+    })
+
+    const rows = result.data.values || []
+    for (const row of rows) {
+      const date = row[0] || ''
+      const eventName = row[1] || ''
+      const address = row[6] || ''
+      if (date || eventName) {
+        keys.add(dedupeKey(date, eventName, address))
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching existing events for dedupe, proceeding without dedupe:', error)
+  }
+
+  return keys
+}
+
 // Add events to Google Spreadsheet
 export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[]; s3Url?: string }>): Promise<void> {
   if (!eventGroups.length) {
@@ -159,8 +190,28 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
 
   const sheets = await getAuthenticatedSheetsClient()
 
+  // Fetch existing events for dedupe
+  const existingKeys = await getExistingEventKeys(sheets, spreadsheetId)
+  console.log(`Found ${existingKeys.size} existing events in spreadsheet`)
+
+  // Filter out duplicates
+  const newEvents = allFormattedEvents.filter(event => {
+    const key = dedupeKey(event.date, event.eventName, event.address)
+    return !existingKeys.has(key)
+  })
+
+  const dupeCount = allFormattedEvents.length - newEvents.length
+  if (dupeCount > 0) {
+    console.log(`Filtered out ${dupeCount} duplicate events`)
+  }
+
+  if (!newEvents.length) {
+    console.log('All events already exist in spreadsheet, skipping append')
+    return
+  }
+
   // Convert to array of arrays for batch insert
-  const rows = allFormattedEvents.map(event => [
+  const rows = newEvents.map(event => [
     event.date,
     event.eventName,
     event.type,

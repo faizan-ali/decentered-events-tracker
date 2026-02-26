@@ -2,18 +2,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Event, addEventsToSpreadsheet, formatCost, formatDate, formatEventForSpreadsheet, formatTime } from './sheets'
 
 // Mock googleapis
+const mockAppend = vi.fn().mockResolvedValue({
+  data: {
+    updates: {
+      updatedRange: 'Sheet1!A1:J5'
+    }
+  }
+})
+const mockGet = vi.fn().mockResolvedValue({
+  data: {
+    values: []
+  }
+})
+
 vi.mock('googleapis', () => ({
   google: {
     sheets: vi.fn(() => ({
       spreadsheets: {
         values: {
-          append: vi.fn().mockResolvedValue({
-            data: {
-              updates: {
-                updatedRange: 'Sheet1!A1:J5'
-              }
-            }
-          })
+          append: mockAppend,
+          get: mockGet
         }
       }
     }))
@@ -368,6 +376,87 @@ describe('addEventsToSpreadsheet', () => {
 
     await addEventsToSpreadsheet([{ events: [] }, { events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
 
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
+  })
+
+  it('should filter out duplicate events based on date + title + address', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    // Simulate existing row in spreadsheet: date is col A, eventName col B, address col G
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [
+          ['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']
+        ]
+      }
+    })
+
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith('Filtered out 1 duplicate events')
+    expect(consoleSpy).toHaveBeenCalledWith('All events already exist in spreadsheet, skipping append')
+    expect(mockAppend).not.toHaveBeenCalled()
+  })
+
+  it('should allow events with same title but different date', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [
+          ['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']
+        ]
+      }
+    })
+
+    const differentDateEvent = { ...sampleEvent, startDay: '2025-03-20T12:00:00' }
+    await addEventsToSpreadsheet([{ events: [differentDateEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
+  })
+
+  it('should allow events with same title and date but different address', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [
+          ['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']
+        ]
+      }
+    })
+
+    const differentAddressEvent = { ...sampleEvent, address: '456 Oak Ave' }
+    await addEventsToSpreadsheet([{ events: [differentAddressEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
+  })
+
+  it('should dedupe case-insensitively', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [
+          ['03/15/2025', 'TEST EVENT', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 MAIN ST', 'A test event', '$20', '']
+        ]
+      }
+    })
+
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith('All events already exist in spreadsheet, skipping append')
+  })
+
+  it('should proceed without dedupe if sheet fetch fails', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+    const consoleErrorSpy = vi.spyOn(console, 'error')
+
+    mockGet.mockRejectedValueOnce(new Error('Sheet fetch failed'))
+
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Error fetching existing events for dedupe'), expect.any(Error))
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
   })
 })
