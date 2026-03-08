@@ -96,7 +96,7 @@ export function formatCost(costString: string | null): string {
 
   const cost = costString.toLowerCase().trim()
 
-  if (cost.includes('free')|| cost === '0' || cost === '$0') {
+  if (cost.includes('free') || cost === '0' || cost === '$0') {
     return 'Free'
   }
 
@@ -130,14 +130,74 @@ export function formatEventForSpreadsheet(event: Event, s3Url: string): Formatte
   }
 }
 
-// Build a dedupe key from date (col A), event name (col B), and address (col G)
-function dedupeKey(date: string, eventName: string, address: string): string {
-  return `${date.toLowerCase().trim()}|${eventName.toLowerCase().trim()}|${address.toLowerCase().trim()}`
+// Normalize text for fuzzy comparison: lowercase, strip punctuation, collapse whitespace
+export function normalizeText(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/["""''`\u2018\u2019\u201C\u201D]/g, '')
+    .replace(/[.,!?;:()[\]{}]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
-// Fetch existing dedupe keys from the spreadsheet
-async function getExistingEventKeys(sheets: any, spreadsheetId: string): Promise<Set<string>> {
-  const keys = new Set<string>()
+// Additional normalization for addresses: standardize abbreviations, strip zip/state
+export function normalizeAddress(s: string): string {
+  let addr = normalizeText(s)
+  addr = addr.replace(/\bstreet\b/g, 'st')
+  addr = addr.replace(/\bavenue\b/g, 'ave')
+  addr = addr.replace(/\bboulevard\b/g, 'blvd')
+  addr = addr.replace(/\bdrive\b/g, 'dr')
+  addr = addr.replace(/\broad\b/g, 'rd')
+  addr = addr.replace(/\bplace\b/g, 'pl')
+  addr = addr.replace(/\bsan francisco\b/g, 'sf')
+  addr = addr.replace(/\b\d{5}(-\d{4})?\b/g, '')
+  return addr.replace(/\s+/g, ' ').trim()
+}
+
+// Dice coefficient on character bigrams
+export function similarity(a: string, b: string): number {
+  if (a === b) return 1
+  if (!a || !b) return 0
+  if (a.length < 2 || b.length < 2) return a === b ? 1 : 0
+
+  const getBigrams = (s: string) => {
+    const bigrams = new Map<string, number>()
+    for (let i = 0; i < s.length - 1; i++) {
+      const bg = s.substring(i, i + 2)
+      bigrams.set(bg, (bigrams.get(bg) || 0) + 1)
+    }
+    return bigrams
+  }
+
+  const bigramsA = getBigrams(a)
+  const bigramsB = getBigrams(b)
+  let intersection = 0
+  for (const [bg, count] of bigramsA) {
+    intersection += Math.min(count, bigramsB.get(bg) || 0)
+  }
+
+  return (2 * intersection) / (a.length - 1 + b.length - 1)
+}
+
+// Check if two strings are a fuzzy match via containment or bigram similarity
+export function isFuzzyMatch(a: string, b: string, threshold = 0.75): boolean {
+  if (a === b) return true
+  if (!a || !b) return a === b
+  const shorter = a.length <= b.length ? a : b
+  const longer = a.length > b.length ? a : b
+  if (shorter.length > 3 && longer.includes(shorter)) return true
+  return similarity(a, b) >= threshold
+}
+
+interface ExistingEvent {
+  date: string
+  title: string
+  address: string
+}
+
+// Fetch existing events from the spreadsheet for fuzzy dedupe
+async function getExistingEvents(sheets: any, spreadsheetId: string): Promise<ExistingEvent[]> {
+  const events: ExistingEvent[] = []
 
   try {
     const result = await sheets.spreadsheets.values.get({
@@ -147,18 +207,18 @@ async function getExistingEventKeys(sheets: any, spreadsheetId: string): Promise
 
     const rows = result.data.values || []
     for (const row of rows) {
-      const date = row[0] || ''
-      const eventName = row[1] || ''
-      const address = row[6] || ''
-      if (date || eventName) {
-        keys.add(dedupeKey(date, eventName, address))
+      const date = (row[0] || '').toLowerCase().trim()
+      const title = normalizeText(row[1] || '')
+      const address = normalizeAddress(row[6] || '')
+      if (date || title) {
+        events.push({ date, title, address })
       }
     }
   } catch (error) {
     console.error('Error fetching existing events for dedupe, proceeding without dedupe:', error)
   }
 
-  return keys
+  return events
 }
 
 // Add events to Google Spreadsheet
@@ -190,14 +250,18 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
 
   const sheets = await getAuthenticatedSheetsClient()
 
-  // Fetch existing events for dedupe
-  const existingKeys = await getExistingEventKeys(sheets, spreadsheetId)
-  console.log(`Found ${existingKeys.size} existing events in spreadsheet`)
+  // Fetch existing events for fuzzy dedupe
+  const existingEvents = await getExistingEvents(sheets, spreadsheetId)
+  console.log(`Found ${existingEvents.length} existing events in spreadsheet`)
 
-  // Filter out duplicates
+  // Filter out duplicates using fuzzy matching on title and address
   const newEvents = allFormattedEvents.filter(event => {
-    const key = dedupeKey(event.date, event.eventName, event.address)
-    return !existingKeys.has(key)
+    const newDate = event.date.toLowerCase().trim()
+    const newTitle = normalizeText(event.eventName)
+    const newAddress = normalizeAddress(event.address)
+
+    const isDupe = existingEvents.some(existing => existing.date === newDate && isFuzzyMatch(existing.title, newTitle) && isFuzzyMatch(existing.address, newAddress))
+    return !isDupe
   })
 
   const dupeCount = allFormattedEvents.length - newEvents.length

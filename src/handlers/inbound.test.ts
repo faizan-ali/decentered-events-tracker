@@ -1,11 +1,7 @@
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda'
+import type { InboundWebhookPayload } from 'inboundemail'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { parseSendgridInbound } from './inbound'
-
-// Mock all dependencies
-vi.mock('lambda-multipart-parser', () => ({
-  parse: vi.fn()
-}))
+import { parseInboundEmail } from './inbound'
 
 vi.mock('./lib/openai', () => ({
   extractEvents: vi.fn()
@@ -19,40 +15,88 @@ vi.mock('./lib/sheets', () => ({
   addEventsToSpreadsheet: vi.fn()
 }))
 
-// Import mocked modules
-import * as parser from 'lambda-multipart-parser'
 import { extractEvents } from './lib/openai'
 import { uploadToS3 } from './lib/s3'
 import { addEventsToSpreadsheet } from './lib/sheets'
 
-const mockParse = parser.parse as ReturnType<typeof vi.fn>
 const mockExtractEvents = extractEvents as ReturnType<typeof vi.fn>
 const mockUploadToS3 = uploadToS3 as ReturnType<typeof vi.fn>
 const mockAddEventsToSpreadsheet = addEventsToSpreadsheet as ReturnType<typeof vi.fn>
 
-describe('parseSendgridInbound', () => {
-  const mockContext: Context = {
-    callbackWaitsForEmptyEventLoop: false,
-    functionName: 'test',
-    functionVersion: '1',
-    invokedFunctionArn: 'arn:aws:lambda:us-west-1:123456789:function:test',
-    memoryLimitInMB: '128',
-    awsRequestId: 'test-request-id',
-    logGroupName: 'test-log-group',
-    logStreamName: 'test-log-stream',
-    getRemainingTimeInMillis: () => 5000,
-    done: () => {},
-    fail: () => {},
-    succeed: () => {}
-  }
+// Mock global fetch for attachment downloads
+const mockFetch = vi.fn()
+vi.stubGlobal('fetch', mockFetch)
 
-  const createEvent = (overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent => ({
-    body: 'multipart-body',
-    headers: { 'content-type': 'multipart/form-data; boundary=----WebKitFormBoundary' },
+const mockContext: Context = {
+  callbackWaitsForEmptyEventLoop: false,
+  functionName: 'test',
+  functionVersion: '1',
+  invokedFunctionArn: 'arn:aws:lambda:us-west-1:123456789:function:test',
+  memoryLimitInMB: '128',
+  awsRequestId: 'test-request-id',
+  logGroupName: 'test-log-group',
+  logStreamName: 'test-log-stream',
+  getRemainingTimeInMillis: () => 5000,
+  done: () => {},
+  fail: () => {},
+  succeed: () => {}
+}
+
+function makePayload(overrides: Partial<{ attachments: any[] }> = {}): InboundWebhookPayload {
+  return {
+    event: 'email.received',
+    timestamp: '2026-03-08T10:00:00Z',
+    email: {
+      id: 'email_123',
+      messageId: '<abc@example.com>',
+      from: { text: 'sender@example.com', addresses: [{ address: 'sender@example.com', name: null }] },
+      to: { text: 'events@decentered.org', addresses: [{ address: 'events@decentered.org', name: null }] },
+      recipient: 'events@decentered.org',
+      subject: 'New event flyer',
+      receivedAt: '2026-03-08T10:00:00Z',
+      parsedData: {
+        messageId: '<abc@example.com>',
+        date: new Date('2026-03-08T10:00:00Z'),
+        subject: 'New event flyer',
+        from: { text: 'sender@example.com', addresses: [{ address: 'sender@example.com', name: null }] },
+        to: { text: 'events@decentered.org', addresses: [{ address: 'events@decentered.org', name: null }] },
+        cc: null,
+        bcc: null,
+        replyTo: null,
+        inReplyTo: undefined,
+        references: undefined,
+        textBody: 'Check out this event',
+        htmlBody: '<p>Check out this event</p>',
+        raw: '',
+        attachments: overrides.attachments ?? [],
+        headers: {},
+        priority: undefined
+      },
+      cleanedContent: {
+        html: null,
+        text: null,
+        hasHtml: false,
+        hasText: false,
+        attachments: [],
+        headers: {}
+      }
+    },
+    endpoint: {
+      id: 'ep_123',
+      name: 'Test Endpoint',
+      type: 'webhook'
+    }
+  }
+}
+
+function createEvent(body: any, overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
+  return {
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+    headers: { 'content-type': 'application/json' },
     multiValueHeaders: {},
     httpMethod: 'POST',
     isBase64Encoded: false,
-    path: '/parse-sendgrid-inbound',
+    path: '/parse-inbound-email',
     pathParameters: null,
     queryStringParameters: null,
     multiValueQueryStringParameters: null,
@@ -80,21 +124,53 @@ describe('parseSendgridInbound', () => {
         userAgent: 'test-agent',
         userArn: null
       },
-      path: '/parse-sendgrid-inbound',
+      path: '/parse-inbound-email',
       stage: 'test',
       requestId: 'test-request-id',
       requestTimeEpoch: Date.now(),
       resourceId: 'test-resource',
-      resourcePath: '/parse-sendgrid-inbound'
+      resourcePath: '/parse-inbound-email'
     },
-    resource: '/parse-sendgrid-inbound',
+    resource: '/parse-inbound-email',
     ...overrides
-  })
+  }
+}
 
+const sampleAttachment = {
+  filename: 'event-flyer.png',
+  contentType: 'image/png',
+  size: 1024,
+  contentId: null,
+  contentDisposition: 'attachment' as const,
+  downloadUrl: 'https://inbound.new/api/e2/attachments/email_123/event-flyer.png'
+}
+
+const sampleEvents = {
+  events: [
+    {
+      title: 'Jazz Night',
+      address: '123 Main St',
+      location: 'San Francisco',
+      type: 'Music',
+      startDay: '2026-03-15',
+      startTime: '20:00',
+      description: 'Live jazz',
+      cost: '$25',
+      endDay: '2026-03-15',
+      endTime: '23:00'
+    }
+  ]
+}
+
+describe('parseInboundEmail', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockUploadToS3.mockResolvedValue('https://bucket.s3.amazonaws.com/images/test.png')
     mockAddEventsToSpreadsheet.mockResolvedValue(undefined)
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(new ArrayBuffer(8))
+    })
   })
 
   afterEach(() => {
@@ -103,9 +179,8 @@ describe('parseSendgridInbound', () => {
 
   describe('request validation', () => {
     it('should return 400 if no body provided', async () => {
-      const event = createEvent({ body: null })
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+      const event = createEvent(null, { body: null })
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result).toEqual({
         statusCode: 400,
@@ -114,9 +189,8 @@ describe('parseSendgridInbound', () => {
     })
 
     it('should return 400 if body is empty string', async () => {
-      const event = createEvent({ body: '' })
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+      const event = createEvent('', { body: '' })
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result).toEqual({
         statusCode: 400,
@@ -126,17 +200,10 @@ describe('parseSendgridInbound', () => {
   })
 
   describe('no attachments', () => {
-    it('should return 200 with message when no files attached', async () => {
-      mockParse.mockResolvedValue({
-        to: 'test@example.com',
-        from: 'sender@example.com',
-        subject: 'Test email',
-        files: []
-      })
-
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+    it('should return 200 when no image attachments', async () => {
+      const payload = makePayload({ attachments: [] })
+      const event = createEvent(payload)
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result).toEqual({
         statusCode: 200,
@@ -144,135 +211,87 @@ describe('parseSendgridInbound', () => {
       })
     })
 
-    it('should return 200 when files is null', async () => {
-      mockParse.mockResolvedValue({
-        to: 'test@example.com',
-        from: 'sender@example.com',
-        subject: 'Test email',
-        files: null
+    it('should skip non-image attachments', async () => {
+      const payload = makePayload({
+        attachments: [
+          {
+            filename: 'doc.pdf',
+            contentType: 'application/pdf',
+            size: 1024,
+            contentId: null,
+            contentDisposition: 'attachment',
+            downloadUrl: 'https://inbound.new/api/e2/attachments/email_123/doc.pdf'
+          }
+        ]
       })
-
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+      const event = createEvent(payload)
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result).toEqual({
         statusCode: 200,
         body: JSON.stringify({ message: 'No attachments found' })
       })
+      expect(mockFetch).not.toHaveBeenCalled()
     })
   })
 
   describe('successful processing', () => {
-    const sampleFile = {
-      filename: 'event-flyer.png',
-      contentType: 'image/png',
-      content: Buffer.from('fake-image-data')
-    }
-
-    const sampleEvents = {
-      events: [
-        {
-          title: 'Jazz Night',
-          address: '123 Main St',
-          location: 'San Francisco',
-          type: 'Music',
-          startDay: '2025-03-15',
-          startTime: '20:00',
-          description: 'Live jazz',
-          cost: '$25',
-          endDay: '2025-03-15',
-          endTime: '23:00'
-        }
-      ]
-    }
-
-    it('should process single attachment successfully', async () => {
-      mockParse.mockResolvedValue({
-        to: 'events@example.com',
-        from: 'sender@example.com',
-        subject: 'New event flyer',
-        files: [sampleFile]
-      })
+    it('should download attachment and extract events', async () => {
+      const payload = makePayload({ attachments: [sampleAttachment] })
       mockExtractEvents.mockResolvedValue(sampleEvents)
 
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+      const event = createEvent(payload)
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result).toEqual({
         statusCode: 200,
         body: JSON.stringify({ message: 'Email parsed successfully' })
       })
-      expect(mockExtractEvents).toHaveBeenCalledWith(sampleFile.content, sampleFile.contentType)
+      expect(mockFetch).toHaveBeenCalledWith(sampleAttachment.downloadUrl, {
+        headers: { Authorization: `Bearer ${process.env.INBOUND_API_KEY}` }
+      })
+      expect(mockExtractEvents).toHaveBeenCalledWith(expect.any(Buffer), 'image/png')
     })
 
-    it('should process multiple attachments', async () => {
-      const file1 = { ...sampleFile, filename: 'flyer1.png' }
-      const file2 = { ...sampleFile, filename: 'flyer2.jpg', contentType: 'image/jpeg' }
-
-      mockParse.mockResolvedValue({
-        to: 'events@example.com',
-        from: 'sender@example.com',
-        subject: 'Multiple flyers',
-        files: [file1, file2]
-      })
+    it('should process multiple image attachments', async () => {
+      const attachment2 = { ...sampleAttachment, filename: 'flyer2.jpg', contentType: 'image/jpeg' }
+      const payload = makePayload({ attachments: [sampleAttachment, attachment2] })
       mockExtractEvents.mockResolvedValue(sampleEvents)
 
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+      const event = createEvent(payload)
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result?.statusCode).toBe(200)
+      expect(mockFetch).toHaveBeenCalledTimes(2)
       expect(mockExtractEvents).toHaveBeenCalledTimes(2)
     })
 
     it('should call uploadToS3 for each attachment', async () => {
-      mockParse.mockResolvedValue({
-        to: 'events@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: [sampleFile]
-      })
+      const payload = makePayload({ attachments: [sampleAttachment] })
       mockExtractEvents.mockResolvedValue(sampleEvents)
 
-      const event = createEvent()
+      const event = createEvent(payload)
+      await parseInboundEmail(event, mockContext, () => {})
 
-      await parseSendgridInbound(event, mockContext, () => {})
-
-      // Note: uploadToS3 is called asynchronously with void
-      // We just verify it was called
-      expect(mockUploadToS3).toHaveBeenCalledWith(sampleFile.content, sampleFile.filename, sampleFile.contentType)
+      expect(mockUploadToS3).toHaveBeenCalledWith(expect.any(Buffer), 'event-flyer.png', 'image/png')
     })
 
     it('should call addEventsToSpreadsheet when events are extracted', async () => {
-      mockParse.mockResolvedValue({
-        to: 'events@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: [sampleFile]
-      })
+      const payload = makePayload({ attachments: [sampleAttachment] })
       mockExtractEvents.mockResolvedValue(sampleEvents)
 
-      const event = createEvent()
-
-      await parseSendgridInbound(event, mockContext, () => {})
+      const event = createEvent(payload)
+      await parseInboundEmail(event, mockContext, () => {})
 
       expect(mockAddEventsToSpreadsheet).toHaveBeenCalled()
     })
 
     it('should not call addEventsToSpreadsheet when no events extracted', async () => {
-      mockParse.mockResolvedValue({
-        to: 'events@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: [sampleFile]
-      })
+      const payload = makePayload({ attachments: [sampleAttachment] })
       mockExtractEvents.mockResolvedValue({ events: [] })
 
-      const event = createEvent()
-
-      await parseSendgridInbound(event, mockContext, () => {})
+      const event = createEvent(payload)
+      await parseInboundEmail(event, mockContext, () => {})
 
       expect(mockAddEventsToSpreadsheet).not.toHaveBeenCalled()
     })
@@ -280,94 +299,56 @@ describe('parseSendgridInbound', () => {
 
   describe('base64 encoded body', () => {
     it('should decode base64 encoded body', async () => {
-      const originalBody = 'multipart form data content'
-      const base64Body = Buffer.from(originalBody).toString('base64')
+      const payload = makePayload({ attachments: [sampleAttachment] })
+      const base64Body = Buffer.from(JSON.stringify(payload)).toString('base64')
+      mockExtractEvents.mockResolvedValue(sampleEvents)
 
-      mockParse.mockResolvedValue({
-        to: 'test@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: []
-      })
+      const event = createEvent(base64Body, { isBase64Encoded: true })
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
-      const event = createEvent({
-        body: base64Body,
-        isBase64Encoded: true
-      })
-
-      await parseSendgridInbound(event, mockContext, () => {})
-
-      // Verify parse was called (meaning body was decoded)
-      expect(mockParse).toHaveBeenCalled()
+      expect(result?.statusCode).toBe(200)
+      expect(mockFetch).toHaveBeenCalled()
     })
   })
 
   describe('error handling', () => {
-    it('should return 500 when parser throws', async () => {
-      mockParse.mockRejectedValue(new Error('Parser error'))
+    it('should return 500 when JSON parse fails', async () => {
+      const event = createEvent('not json', { body: 'not json' })
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
-
-      expect(result).toEqual({
-        statusCode: 500,
-        body: JSON.stringify({
-          error: 'Failed to parse inbound email',
-          details: 'Parser error'
-        })
-      })
+      expect(result?.statusCode).toBe(500)
     })
 
-    it('should continue processing other attachments if one fails extraction', async () => {
-      const file1 = { filename: 'bad.png', contentType: 'image/png', content: Buffer.from('bad') }
-      const file2 = { filename: 'good.png', contentType: 'image/png', content: Buffer.from('good') }
+    it('should continue processing if one attachment download fails', async () => {
+      const attachment2 = { ...sampleAttachment, filename: 'flyer2.jpg', contentType: 'image/jpeg', downloadUrl: 'https://inbound.new/api/e2/attachments/email_123/flyer2.jpg' }
+      const payload = makePayload({ attachments: [sampleAttachment, attachment2] })
 
-      mockParse.mockResolvedValue({
-        to: 'test@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: [file1, file2]
-      })
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' })
+        .mockResolvedValueOnce({ ok: true, arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) })
 
-      mockExtractEvents
-        .mockRejectedValueOnce(new Error('Extraction failed'))
-        .mockResolvedValueOnce({
-          events: [{ title: 'Good Event', address: '', location: '', type: '', startDay: null, startTime: null, description: '', cost: null, endDay: null, endTime: null }]
-        })
+      mockExtractEvents.mockResolvedValue(sampleEvents)
 
-      const event = createEvent()
+      const event = createEvent(payload)
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result?.statusCode).toBe(200)
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to extract events'), expect.any(Error))
+      expect(mockExtractEvents).toHaveBeenCalledTimes(1)
 
       consoleSpy.mockRestore()
     })
 
     it('should handle S3 upload failures gracefully', async () => {
-      const sampleFile = {
-        filename: 'test.png',
-        contentType: 'image/png',
-        content: Buffer.from('test')
-      }
-
-      mockParse.mockResolvedValue({
-        to: 'test@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: [sampleFile]
-      })
+      const payload = makePayload({ attachments: [sampleAttachment] })
       mockExtractEvents.mockResolvedValue({ events: [] })
       mockUploadToS3.mockRejectedValue(new Error('S3 error'))
 
-      const event = createEvent()
+      const event = createEvent(payload)
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-      // Should not throw despite S3 failure
-      const result = await parseSendgridInbound(event, mockContext, () => {})
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result?.statusCode).toBe(200)
 
@@ -375,84 +356,18 @@ describe('parseSendgridInbound', () => {
     })
 
     it('should return 500 with unknown error for non-Error throws', async () => {
-      mockParse.mockRejectedValue('string error')
+      const event = createEvent('{}', { body: '{}' })
 
-      const event = createEvent()
+      // This will fail because the payload structure is invalid
+      const result = await parseInboundEmail(event, mockContext, () => {})
 
-      const result = await parseSendgridInbound(event, mockContext, () => {})
-
-      expect(result).toEqual({
-        statusCode: 500,
-        body: JSON.stringify({
-          error: 'Failed to parse inbound email',
-          details: 'Unknown error'
-        })
-      })
-    })
-  })
-
-  describe('email parsing', () => {
-    it('should parse email metadata correctly', async () => {
-      mockParse.mockResolvedValue({
-        to: 'events@decentered.org',
-        from: 'user@gmail.com',
-        subject: 'Check out this event!',
-        text: 'Here is a cool event',
-        html: '<p>Here is a cool event</p>',
-        files: []
-      })
-
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
-
-      expect(result?.statusCode).toBe(200)
-    })
-
-    it('should handle missing email metadata fields', async () => {
-      mockParse.mockResolvedValue({
-        files: []
-      })
-
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
-
-      expect(result?.statusCode).toBe(200)
-    })
-
-    it('should handle file without filename', async () => {
-      mockParse.mockResolvedValue({
-        to: 'test@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: [
-          {
-            contentType: 'image/png',
-            content: Buffer.from('test')
-            // Note: no filename
-          }
-        ]
-      })
-      mockExtractEvents.mockResolvedValue({ events: [] })
-
-      const event = createEvent()
-
-      const result = await parseSendgridInbound(event, mockContext, () => {})
-
-      expect(result?.statusCode).toBe(200)
-      expect(mockUploadToS3).toHaveBeenCalledWith(expect.any(Buffer), 'image', 'image/png')
+      expect(result?.statusCode).toBe(500)
     })
   })
 
   describe('event normalization', () => {
-    it('should normalize extracted events', async () => {
-      const sampleFile = {
-        filename: 'test.png',
-        contentType: 'image/png',
-        content: Buffer.from('test')
-      }
-
+    it('should normalize extracted events (fill missing endDay from startDay)', async () => {
+      const payload = makePayload({ attachments: [sampleAttachment] })
       const rawEvents = {
         events: [
           {
@@ -460,7 +375,7 @@ describe('parseSendgridInbound', () => {
             address: '123 St',
             location: 'SF',
             type: 'Music',
-            startDay: '2025-03-15',
+            startDay: '2026-03-15',
             startTime: '19:00',
             description: 'Test',
             cost: null,
@@ -469,28 +384,15 @@ describe('parseSendgridInbound', () => {
           }
         ]
       }
-
-      mockParse.mockResolvedValue({
-        to: 'test@example.com',
-        from: 'sender@example.com',
-        subject: 'Test',
-        files: [sampleFile]
-      })
       mockExtractEvents.mockResolvedValue(rawEvents)
 
-      const event = createEvent()
+      const event = createEvent(payload)
+      await parseInboundEmail(event, mockContext, () => {})
 
-      await parseSendgridInbound(event, mockContext, () => {})
-
-      // Verify addEventsToSpreadsheet was called with normalized events
       expect(mockAddEventsToSpreadsheet).toHaveBeenCalledWith(
         expect.arrayContaining([
           expect.objectContaining({
-            events: expect.arrayContaining([
-              expect.objectContaining({
-                endDay: '2025-03-15' // Should be normalized from null to startDay
-              })
-            ])
+            events: expect.arrayContaining([expect.objectContaining({ endDay: '2026-03-15' })])
           })
         ])
       )

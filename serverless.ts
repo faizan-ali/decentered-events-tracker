@@ -16,10 +16,8 @@ const serverlessConfiguration: AWS = {
       GOOGLE_SERVICE_ACCOUNT_EMAIL: '${env:GOOGLE_SERVICE_ACCOUNT_EMAIL}',
       GOOGLE_PRIVATE_KEY: '${env:GOOGLE_PRIVATE_KEY}',
       S3_BUCKET: '${env:S3_BUCKET}',
-      REGION: '${env:REGION}'
-    },
-    apiGateway: {
-      binaryMediaTypes: ['multipart/form-data', 'application/octet-stream', 'image/*']
+      REGION: '${env:REGION}',
+      INBOUND_API_KEY: '${env:INBOUND_API_KEY}'
     }
   },
 
@@ -42,13 +40,13 @@ const serverlessConfiguration: AWS = {
   },
 
   functions: {
-    parseSendgridInbound: {
-      handler: 'src/handlers/inbound.parseSendgridInbound',
+    parseInboundEmail: {
+      handler: 'src/handlers/inbound.parseInboundEmail',
       events: [
         {
           http: {
             method: 'post',
-            path: 'parse-sendgrid-inbound',
+            path: 'parse-inbound-email',
             cors: {
               origin: '*',
               headers: ['Content-Type']

@@ -22,7 +22,7 @@ interface GPTResponse {
 
 export async function extractEvents(imageBuffer: Buffer, fileType: string): Promise<GPTResponse> {
   const response = await openai.chat.completions.create({
-    model: 'gpt-5.2',
+    model: 'gpt-5.4',
     messages: [
       {
         role: 'user',

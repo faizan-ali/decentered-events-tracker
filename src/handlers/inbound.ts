@@ -1,29 +1,26 @@
 import type { APIGatewayProxyHandler, APIGatewayProxyResult } from 'aws-lambda'
-import * as parser from 'lambda-multipart-parser'
+import type { InboundEmailAttachment, InboundWebhookPayload } from 'inboundemail'
 import { type Event, normalizeEvent } from './lib/events'
 import { extractEvents } from './lib/openai'
 import { uploadToS3 } from './lib/s3'
 import { addEventsToSpreadsheet } from './lib/sheets'
 
-interface ParsedAttachment {
-  filename: string
-  contentType: string
-  content: Buffer
-  size: number
-  s3Key?: string
-  s3Url?: string
+const INBOUND_API_KEY = process.env.INBOUND_API_KEY
+
+async function downloadAttachment(attachment: InboundEmailAttachment): Promise<Buffer> {
+  const response = await fetch(attachment.downloadUrl, {
+    headers: { Authorization: `Bearer ${INBOUND_API_KEY}` }
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to download attachment ${attachment.filename}: ${response.status} ${response.statusText}`)
+  }
+
+  const arrayBuffer = await response.arrayBuffer()
+  return Buffer.from(arrayBuffer)
 }
 
-interface ParsedEmail {
-  to: string[]
-  from: string
-  subject: string
-  text?: string
-  html?: string
-  attachments: ParsedAttachment[]
-}
-
-export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promise<APIGatewayProxyResult> => {
+export const parseInboundEmail: APIGatewayProxyHandler = async (event): Promise<APIGatewayProxyResult> => {
   console.log('Received event:', JSON.stringify({ ...event, body: event.body ? 'body present' : 'no body' }, null, 2))
   const allEvents: Array<{ events: Event[]; s3Url?: string }> = []
 
@@ -33,76 +30,51 @@ export const parseSendgridInbound: APIGatewayProxyHandler = async (event): Promi
       return { statusCode: 400, body: JSON.stringify({ error: 'No body provided' }) }
     }
 
-    // Handle base64-encoded body from AWS API Gateway
-    let eventToProcess = event
+    const payload: InboundWebhookPayload = JSON.parse(event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString() : event.body)
+    const { email } = payload
 
-    if (event.isBase64Encoded && event.body) {
-      const decodedBody = Buffer.from(event.body, 'base64').toString('binary')
-      eventToProcess = { ...event, body: decodedBody, isBase64Encoded: false }
-    }
+    console.log(`Received email from ${email.from.text} - subject: ${email.subject}`)
 
-    // Parse the multipart form data
-    const parsedData = await parser.parse(eventToProcess)
+    const attachments = email.parsedData.attachments.filter(a => a.contentType.startsWith('image/'))
 
-    // Extract basic email information from the parsed form data
-    const emailData: ParsedEmail = {
-      to: parsedData.to ? [parsedData.to] : [],
-      from: parsedData.from || '',
-      subject: parsedData.subject || '',
-      text: parsedData.text,
-      html: parsedData.html,
-      attachments: []
-    }
-
-    if (!parsedData.files?.length) {
-      console.log('No attachments found')
+    if (!attachments.length) {
+      console.log('No image attachments found')
       return { statusCode: 200, body: JSON.stringify({ message: 'No attachments found' }) }
     }
 
-    console.log(`Found ${parsedData.files.length} attachments`)
+    console.log(`Found ${attachments.length} image attachments`)
 
-    const processedAttachments = await Promise.all(
-      parsedData.files.map(async file => {
-        const parsedAttachment: ParsedAttachment = {
-          filename: file.filename || 'image',
-          contentType: file.contentType,
-          content: file.content,
-          size: file.content.length
-        }
-
-        console.log(`Uploading attachment: ${parsedAttachment.filename} (${parsedAttachment.size} bytes)`)
-
-        void uploadToS3(parsedAttachment.content, parsedAttachment.filename, parsedAttachment.contentType)
-          .then(s3Url => {
-            parsedAttachment.s3Url = s3Url
-            console.log(`Successfully uploaded: ${parsedAttachment.filename} to S3 key: ${s3Url}`)
-          })
-          .catch(s3Error => {
-            console.error(`Failed to upload attachment ${parsedAttachment.filename}:`, s3Error)
-          })
-
+    await Promise.all(
+      attachments.map(async attachment => {
         try {
-          const events = await extractEvents(parsedAttachment.content, parsedAttachment.contentType)
-          console.log(`Extracted events from attachment ${parsedAttachment.filename}:`, events)
+          console.log(`Downloading attachment: ${attachment.filename} (${attachment.size} bytes)`)
+
+          const content = await downloadAttachment(attachment)
+
+          void uploadToS3(content, attachment.filename, attachment.contentType)
+            .then(s3Url => {
+              console.log(`Successfully uploaded: ${attachment.filename} to S3: ${s3Url}`)
+            })
+            .catch(s3Error => {
+              console.error(`Failed to upload attachment ${attachment.filename}:`, s3Error)
+            })
+
+          const events = await extractEvents(content, attachment.contentType)
+          console.log(`Extracted events from attachment ${attachment.filename}:`, events)
 
           if (events.events?.length > 0) {
-            allEvents.push({ events: events.events.map(normalizeEvent), s3Url: parsedAttachment.s3Url })
+            allEvents.push({ events: events.events.map(normalizeEvent) })
           }
         } catch (error) {
-          console.error(`Failed to extract events from attachment ${parsedAttachment.filename}:`, error)
+          console.error(`Failed to process attachment ${attachment.filename}:`, error)
         }
-
-        return parsedAttachment
       })
     )
-
-    emailData.attachments.push(...processedAttachments)
 
     if (allEvents.length > 0) {
       await addEventsToSpreadsheet(allEvents)
     }
 
-    console.log('Parsed email summary:', { parsedData, emailData })
     console.log(`Successfully processed ${allEvents.length} attachments with events`, { events: allEvents })
     return { statusCode: 200, body: JSON.stringify({ message: 'Email parsed successfully' }) }
   } catch (error) {

@@ -181,7 +181,7 @@ describe('extractEvents', () => {
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: 'gpt-5.2',
+          model: 'gpt-5.4',
           response_format: { type: 'json_object' }
         })
       )

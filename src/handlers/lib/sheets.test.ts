@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { type Event, addEventsToSpreadsheet, formatCost, formatDate, formatEventForSpreadsheet, formatTime } from './sheets'
+import {
+  type Event,
+  addEventsToSpreadsheet,
+  formatCost,
+  formatDate,
+  formatEventForSpreadsheet,
+  formatTime,
+  isFuzzyMatch,
+  normalizeAddress,
+  normalizeText,
+  similarity
+} from './sheets'
 
 // Mock googleapis
 const mockAppend = vi.fn().mockResolvedValue({
@@ -382,12 +393,9 @@ describe('addEventsToSpreadsheet', () => {
   it('should filter out duplicate events based on date + title + address', async () => {
     const consoleSpy = vi.spyOn(console, 'log')
 
-    // Simulate existing row in spreadsheet: date is col A, eventName col B, address col G
     mockGet.mockResolvedValueOnce({
       data: {
-        values: [
-          ['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']
-        ]
+        values: [['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']]
       }
     })
 
@@ -403,9 +411,7 @@ describe('addEventsToSpreadsheet', () => {
 
     mockGet.mockResolvedValueOnce({
       data: {
-        values: [
-          ['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']
-        ]
+        values: [['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']]
       }
     })
 
@@ -415,18 +421,16 @@ describe('addEventsToSpreadsheet', () => {
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
   })
 
-  it('should allow events with same title and date but different address', async () => {
+  it('should allow events with same title and date but totally different address', async () => {
     const consoleSpy = vi.spyOn(console, 'log')
 
     mockGet.mockResolvedValueOnce({
       data: {
-        values: [
-          ['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']
-        ]
+        values: [['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 Main St', 'A test event', '$20', '']]
       }
     })
 
-    const differentAddressEvent = { ...sampleEvent, address: '456 Oak Ave' }
+    const differentAddressEvent = { ...sampleEvent, address: '456 Oak Ave, Oakland' }
     await addEventsToSpreadsheet([{ events: [differentAddressEvent], s3Url: 'https://example.com/image.png' }])
 
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
@@ -437,15 +441,61 @@ describe('addEventsToSpreadsheet', () => {
 
     mockGet.mockResolvedValueOnce({
       data: {
-        values: [
-          ['03/15/2025', 'TEST EVENT', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 MAIN ST', 'A test event', '$20', '']
-        ]
+        values: [['03/15/2025', 'TEST EVENT', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '123 MAIN ST', 'A test event', '$20', '']]
       }
     })
 
     await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
 
     expect(consoleSpy).toHaveBeenCalledWith('All events already exist in spreadsheet, skipping append')
+  })
+
+  it('should fuzzy match addresses with different abbreviations', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [['03/15/2025', 'Test Event', 'Music', '7:00 PM', '10:00 PM', 'San Francisco', '5757 Horton St. B Emeryville CA', 'desc', '$20', '']]
+      }
+    })
+
+    const event = { ...sampleEvent, address: '5757 Horton Street B, Emeryville, CA 94608' }
+    await addEventsToSpreadsheet([{ events: [event], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith('Filtered out 1 duplicate events')
+    expect(mockAppend).not.toHaveBeenCalled()
+  })
+
+  it('should fuzzy match titles with minor differences', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [['03/15/2025', '"Carnival" curated by Kate Ortega.', 'Visual Art', '', '', 'San Francisco', 'Adobe Books 3130 24th St.', 'desc', '', '']]
+      }
+    })
+
+    const event = { ...sampleEvent, title: 'Carnival', address: 'Adobe Books, 3130 24th St, San Francisco, CA' }
+    await addEventsToSpreadsheet([{ events: [event], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith('Filtered out 1 duplicate events')
+    expect(mockAppend).not.toHaveBeenCalled()
+  })
+
+  it('should fuzzy match addresses with San Francisco vs SF', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [['03/15/2025', 'Test Event', '', '', '', '', 'Di Rosa Museum San Francisco, 1150 25th St.', '', '', '']]
+      }
+    })
+
+    const event = { ...sampleEvent, address: 'di Rosa Museum, 1150 25th Street, San Francisco' }
+    await addEventsToSpreadsheet([{ events: [event], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith('Filtered out 1 duplicate events')
+    expect(mockAppend).not.toHaveBeenCalled()
   })
 
   it('should proceed without dedupe if sheet fetch fails', async () => {
@@ -458,5 +508,131 @@ describe('addEventsToSpreadsheet', () => {
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Error fetching existing events for dedupe'), expect.any(Error))
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
+  })
+})
+
+describe('normalizeText', () => {
+  it('should lowercase and strip punctuation', () => {
+    expect(normalizeText('"Carnival" curated by Kate Ortega.')).toBe('carnival curated by kate ortega')
+  })
+
+  it('should collapse whitespace', () => {
+    expect(normalizeText('An   Afternoon   of  Art')).toBe('an afternoon of art')
+  })
+
+  it('should handle empty string', () => {
+    expect(normalizeText('')).toBe('')
+  })
+
+  it('should strip smart quotes', () => {
+    expect(normalizeText('\u201CHello\u201D')).toBe('hello')
+  })
+})
+
+describe('normalizeAddress', () => {
+  it('should normalize Street to st', () => {
+    expect(normalizeAddress('5757 Horton Street B')).toBe('5757 horton st b')
+  })
+
+  it('should strip zip codes', () => {
+    expect(normalizeAddress('Emeryville, CA 94608')).toBe('emeryville ca')
+  })
+
+  it('should normalize San Francisco to sf', () => {
+    expect(normalizeAddress('123 Main St, San Francisco, CA')).toBe('123 main st sf ca')
+  })
+
+  it('should normalize full addresses consistently', () => {
+    const a = normalizeAddress('5757 Horton St. B Emeryville CA')
+    const b = normalizeAddress('5757 Horton Street B, Emeryville, CA 94608')
+    expect(a).toBe(b)
+  })
+
+  it('should handle empty string', () => {
+    expect(normalizeAddress('')).toBe('')
+  })
+})
+
+describe('similarity', () => {
+  it('should return 1 for identical strings', () => {
+    expect(similarity('hello', 'hello')).toBe(1)
+  })
+
+  it('should return 0 for completely different strings', () => {
+    expect(similarity('abc', 'xyz')).toBe(0)
+  })
+
+  it('should return high similarity for similar strings', () => {
+    expect(similarity('carnival', 'carnival curated')).toBeGreaterThan(0.5)
+  })
+
+  it('should return 0 for empty strings', () => {
+    expect(similarity('', 'hello')).toBe(0)
+    expect(similarity('hello', '')).toBe(0)
+  })
+
+  it('should handle single character strings', () => {
+    expect(similarity('a', 'a')).toBe(1)
+    expect(similarity('a', 'b')).toBe(0)
+  })
+})
+
+describe('isFuzzyMatch', () => {
+  it('should match identical strings', () => {
+    expect(isFuzzyMatch('hello', 'hello')).toBe(true)
+  })
+
+  it('should match when shorter is contained in longer', () => {
+    expect(isFuzzyMatch('carnival', 'carnival curated by kate ortega')).toBe(true)
+  })
+
+  it('should match similar strings above threshold', () => {
+    expect(isFuzzyMatch('afternoon of feminist art + action', 'an afternoon of feminist art + action')).toBe(true)
+  })
+
+  it('should not match completely different strings', () => {
+    expect(isFuzzyMatch('jazz night at the club', 'vintage market in berkeley')).toBe(false)
+  })
+
+  it('should match empty strings with each other', () => {
+    expect(isFuzzyMatch('', '')).toBe(true)
+  })
+
+  it('should not match empty with non-empty', () => {
+    expect(isFuzzyMatch('', 'something')).toBe(false)
+  })
+
+  it('should not match very short substrings (3 chars or less)', () => {
+    expect(isFuzzyMatch('art', 'art gallery opening night')).toBe(false)
+  })
+
+  describe('real-world GPT extraction differences', () => {
+    it('should match: Carnival variations', () => {
+      expect(isFuzzyMatch(normalizeText('"Carnival" curated by Kate Ortega.'), normalizeText('Carnival'))).toBe(true)
+    })
+
+    it('should match: Feminist Art variations', () => {
+      expect(isFuzzyMatch(normalizeText('Afternoon of Feminist Art + Action'), normalizeText('An Afternoon of Feminist Art + Action'))).toBe(true)
+    })
+
+    it('should match: Berkeley Vintage Market with trailing punctuation', () => {
+      expect(isFuzzyMatch(normalizeText('Berkeley Vintage Market! '), normalizeText('Berkeley Vintage Market'))).toBe(true)
+    })
+
+    it('should match: address with St vs Street and zip differences', () => {
+      expect(isFuzzyMatch(normalizeAddress('5757 Horton St. B Emeryville CA'), normalizeAddress('5757 Horton Street B, Emeryville, CA 94608'))).toBe(true)
+    })
+
+    it('should match: address with different punctuation and city inclusion', () => {
+      expect(isFuzzyMatch(normalizeAddress('Adobe Books 3130 24th St.'), normalizeAddress('Adobe Books, 3130 24th St, San Francisco, CA'))).toBe(true)
+    })
+
+    it('should match: address with varying detail levels', () => {
+      expect(isFuzzyMatch(normalizeAddress('905 Parker St. Berkeley'), normalizeAddress('905 Parker St., Berkeley, CA'))).toBe(true)
+    })
+
+    it('should match: Di Rosa Museum address variations', () => {
+      expect(isFuzzyMatch(normalizeAddress('Di Rosa Museum San Francisco, 1150 25th St.'), normalizeAddress('di Rosa Museum (di Rosa SF), 1150 25th Street'))).toBe(true)
+    })
   })
 })
