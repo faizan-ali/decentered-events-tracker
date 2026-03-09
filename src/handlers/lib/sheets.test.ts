@@ -357,14 +357,85 @@ describe('addEventsToSpreadsheet', () => {
     await expect(addEventsToSpreadsheet([{ events: [sampleEvent] }])).rejects.toThrow('GOOGLE_SPREADSHEET_ID environment variable not set')
   })
 
-  it('should process single event group', async () => {
-    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
+  it('should append row with every column correct (A: date, B: eventName, C: type, D: startTime, E: endTime, F: location, G: address, H: description, I: cost, J: link)', async () => {
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://s3.example.com/images/flyer.png' }])
 
-    // If no error thrown, the function completed successfully
-    expect(true).toBe(true)
+    expect(mockAppend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        spreadsheetId: 'test-spreadsheet-id',
+        range: 'A:J',
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [
+            [
+              '03/15/2025',                        // A: date (MM/DD/YYYY)
+              'Test Event',                        // B: eventName
+              'Music',                             // C: type
+              '7:00 PM',                           // D: startTime (12h format)
+              '10:00 PM',                          // E: endTime (12h format)
+              'San Francisco',                     // F: location
+              '123 Main St',                       // G: address
+              'A test event',                      // H: description
+              '$20',                               // I: cost
+              'https://s3.example.com/images/flyer.png' // J: link (s3Url)
+            ]
+          ]
+        }
+      })
+    )
   })
 
-  it('should process multiple event groups', async () => {
+  it('should include s3Url as link column (J) for each event in a group', async () => {
+    const s3Url = 'https://bucket.s3.amazonaws.com/images/event.jpg'
+    await addEventsToSpreadsheet([{
+      events: [sampleEvent, { ...sampleEvent, title: 'Second Event' }],
+      s3Url
+    }])
+
+    const call = mockAppend.mock.calls[0][0]
+    const rows = call.requestBody.values
+    expect(rows).toHaveLength(2)
+    expect(rows[0][9]).toBe(s3Url) // J column for first event
+    expect(rows[1][9]).toBe(s3Url) // J column for second event
+  })
+
+  it('should set link column to empty string when s3Url is undefined', async () => {
+    await addEventsToSpreadsheet([{ events: [sampleEvent] }])
+
+    const call = mockAppend.mock.calls[0][0]
+    expect(call.requestBody.values[0][9]).toBe('') // J column
+  })
+
+  it('should format null fields as empty strings or Unknown', async () => {
+    const nullEvent: Event = {
+      title: 'Null Test',
+      address: '',
+      location: '',
+      type: '',
+      startDay: null,
+      startTime: null,
+      description: '',
+      cost: null,
+      endDay: null,
+      endTime: null
+    }
+
+    await addEventsToSpreadsheet([{ events: [nullEvent], s3Url: 'https://example.com/img.png' }])
+
+    const row = mockAppend.mock.calls[0][0].requestBody.values[0]
+    expect(row[0]).toBe('')           // A: date — null startDay
+    expect(row[1]).toBe('Null Test')  // B: eventName
+    expect(row[2]).toBe('')           // C: type
+    expect(row[3]).toBe('')           // D: startTime — null
+    expect(row[4]).toBe('')           // E: endTime — null
+    expect(row[5]).toBe('')           // F: location
+    expect(row[6]).toBe('')           // G: address
+    expect(row[7]).toBe('')           // H: description
+    expect(row[8]).toBe('Unknown')    // I: cost — null becomes Unknown
+    expect(row[9]).toBe('https://example.com/img.png') // J: link
+  })
+
+  it('should process multiple event groups with correct s3Urls per group', async () => {
     const eventGroups = [
       { events: [sampleEvent], s3Url: 'https://example.com/image1.png' },
       {
@@ -378,8 +449,11 @@ describe('addEventsToSpreadsheet', () => {
 
     await addEventsToSpreadsheet(eventGroups)
 
-    // If no error thrown, the function completed successfully
-    expect(true).toBe(true)
+    const rows = mockAppend.mock.calls[0][0].requestBody.values
+    expect(rows).toHaveLength(3)
+    expect(rows[0][9]).toBe('https://example.com/image1.png') // group 1
+    expect(rows[1][9]).toBe('https://example.com/image2.png') // group 2 event 1
+    expect(rows[2][9]).toBe('https://example.com/image2.png') // group 2 event 2
   })
 
   it('should skip groups with empty events array', async () => {

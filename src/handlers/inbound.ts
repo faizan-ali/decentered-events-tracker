@@ -51,19 +51,23 @@ export const parseInboundEmail: APIGatewayProxyHandler = async (event): Promise<
 
           const content = await downloadAttachment(attachment)
 
-          void uploadToS3(content, attachment.filename, attachment.contentType)
-            .then(s3Url => {
-              console.log(`Successfully uploaded: ${attachment.filename} to S3: ${s3Url}`)
-            })
-            .catch(s3Error => {
-              console.error(`Failed to upload attachment ${attachment.filename}:`, s3Error)
-            })
+          const [s3Url, events] = await Promise.all([
+            uploadToS3(content, attachment.filename, attachment.contentType)
+              .then(url => {
+                console.log(`Successfully uploaded: ${attachment.filename} to S3: ${url}`)
+                return url
+              })
+              .catch(s3Error => {
+                console.error(`Failed to upload attachment ${attachment.filename}:`, s3Error)
+                return undefined
+              }),
+            extractEvents(content, attachment.contentType)
+          ])
 
-          const events = await extractEvents(content, attachment.contentType)
           console.log(`Extracted events from attachment ${attachment.filename}:`, events)
 
           if (events.events?.length > 0) {
-            allEvents.push({ events: events.events.map(normalizeEvent) })
+            allEvents.push({ events: events.events.map(normalizeEvent), s3Url })
           }
         } catch (error) {
           console.error(`Failed to process attachment ${attachment.filename}:`, error)

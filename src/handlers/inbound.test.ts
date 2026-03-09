@@ -276,14 +276,18 @@ describe('parseInboundEmail', () => {
       expect(mockUploadToS3).toHaveBeenCalledWith(expect.any(Buffer), 'event-flyer.png', 'image/png')
     })
 
-    it('should call addEventsToSpreadsheet when events are extracted', async () => {
+    it('should call addEventsToSpreadsheet with s3Url when events are extracted', async () => {
       const payload = makePayload({ attachments: [sampleAttachment] })
       mockExtractEvents.mockResolvedValue(sampleEvents)
 
       const event = createEvent(payload)
       await parseInboundEmail(event, mockContext, () => {})
 
-      expect(mockAddEventsToSpreadsheet).toHaveBeenCalled()
+      expect(mockAddEventsToSpreadsheet).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ s3Url: 'https://bucket.s3.amazonaws.com/images/test.png' })
+        ])
+      )
     })
 
     it('should not call addEventsToSpreadsheet when no events extracted', async () => {
