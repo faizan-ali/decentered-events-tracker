@@ -5,8 +5,13 @@ const REGION = process.env.REGION
 
 const s3Client = new S3Client({ region: REGION })
 
+function sanitizeFilename(filename: string): string {
+  return filename.replace(/[^a-zA-Z0-9._-]/g, '_')
+}
+
 export async function uploadToS3(buffer: Buffer, filename: string, contentType: string): Promise<string> {
-  const s3Key = `images/${filename}`
+  const sanitized = sanitizeFilename(filename)
+  const s3Key = `images/${sanitized}`
 
   const uploadCommand = new PutObjectCommand({
     Bucket: S3_BUCKET,
@@ -14,7 +19,7 @@ export async function uploadToS3(buffer: Buffer, filename: string, contentType: 
     Body: buffer,
     ContentType: contentType,
     Metadata: {
-      originalFilename: filename,
+      originalFilename: encodeURIComponent(filename),
       uploadTimestamp: new Date().toISOString()
     }
   })

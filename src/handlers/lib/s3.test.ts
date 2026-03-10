@@ -112,7 +112,7 @@ describe('uploadToS3', () => {
   })
 
   describe('metadata', () => {
-    it('should include original filename in metadata', async () => {
+    it('should include URL-encoded original filename in metadata', async () => {
       const uploadToS3 = await getUploadToS3()
       mockSend.mockResolvedValue({})
 
@@ -124,7 +124,25 @@ describe('uploadToS3', () => {
       expect(mockSend).toHaveBeenCalledWith(
         expect.objectContaining({
           Metadata: expect.objectContaining({
-            originalFilename: filename
+            originalFilename: encodeURIComponent(filename)
+          })
+        })
+      )
+    })
+
+    it('should URL-encode filenames with spaces in metadata', async () => {
+      const uploadToS3 = await getUploadToS3()
+      mockSend.mockResolvedValue({})
+
+      const buffer = Buffer.from('test')
+      const filename = 'Screenshot 2026-03-09 at 12.01.13 PM.png'
+
+      await uploadToS3(buffer, filename, 'image/png')
+
+      expect(mockSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Metadata: expect.objectContaining({
+            originalFilename: encodeURIComponent(filename)
           })
         })
       )
@@ -188,16 +206,30 @@ describe('uploadToS3', () => {
       expect(result).toBe('https://east-bucket.s3.us-east-1.amazonaws.com/images/photo.jpg')
     })
 
-    it('should handle filenames with spaces', async () => {
+    it('should sanitize filenames with spaces in S3 key', async () => {
       const uploadToS3 = await getUploadToS3()
       mockSend.mockResolvedValue({})
 
       const result = await uploadToS3(Buffer.from('test'), 'my image file.png', 'image/png')
 
-      expect(result).toContain('my image file.png')
+      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/my_image_file.png')
+      expect(mockSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Key: 'images/my_image_file.png'
+        })
+      )
     })
 
-    it('should handle filenames with special characters', async () => {
+    it('should sanitize screenshot-style filenames', async () => {
+      const uploadToS3 = await getUploadToS3()
+      mockSend.mockResolvedValue({})
+
+      const result = await uploadToS3(Buffer.from('test'), 'Screenshot 2026-03-09 at 12.01.13 PM.png', 'image/png')
+
+      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/Screenshot_2026-03-09_at_12.01.13_PM.png')
+    })
+
+    it('should preserve safe characters in filenames', async () => {
       const uploadToS3 = await getUploadToS3()
       mockSend.mockResolvedValue({})
 
@@ -321,7 +353,16 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), longFilename, 'image/png')
 
-      expect(result).toContain(longFilename)
+      expect(result).toContain(`${'a'.repeat(200)}.png`)
+    })
+
+    it('should sanitize parentheses and brackets in filenames', async () => {
+      const uploadToS3 = await getUploadToS3()
+      mockSend.mockResolvedValue({})
+
+      const result = await uploadToS3(Buffer.from('test'), 'image (1) [copy].png', 'image/png')
+
+      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/image__1___copy_.png')
     })
   })
 })
