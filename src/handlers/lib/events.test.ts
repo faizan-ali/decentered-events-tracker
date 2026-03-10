@@ -72,6 +72,42 @@ describe('normalizeEvent', () => {
       expect(result.endTime).toBe('01:30')
     })
 
+    it('should handle AM/PM format startTime (7:00 PM + 3h = 22:00)', () => {
+      const event: Event = {
+        ...baseEvent,
+        startTime: '7:00 PM',
+        endTime: null
+      }
+
+      const result = normalizeEvent(event)
+
+      expect(result.endTime).toBe('22:00')
+    })
+
+    it('should handle AM/PM format startTime (2:30 PM + 3h = 17:30)', () => {
+      const event: Event = {
+        ...baseEvent,
+        startTime: '2:30 PM',
+        endTime: null
+      }
+
+      const result = normalizeEvent(event)
+
+      expect(result.endTime).toBe('17:30')
+    })
+
+    it('should handle lowercase am/pm', () => {
+      const event: Event = {
+        ...baseEvent,
+        startTime: '10:00 am',
+        endTime: null
+      }
+
+      const result = normalizeEvent(event)
+
+      expect(result.endTime).toBe('13:00')
+    })
+
     it('should preserve existing endTime if present', () => {
       const event: Event = {
         ...baseEvent,

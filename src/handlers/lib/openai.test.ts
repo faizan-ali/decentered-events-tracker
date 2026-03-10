@@ -320,6 +320,36 @@ describe('extractEvents', () => {
 
       await expect(extractEvents(sampleImageBuffer, sampleContentType)).rejects.toThrow()
     })
+
+    it('should return empty events when GPT returns null content', async () => {
+      mockCreate.mockResolvedValue({
+        choices: [{ message: { content: null } }]
+      })
+
+      const result = await extractEvents(sampleImageBuffer, sampleContentType)
+
+      expect(result.events).toEqual([])
+    })
+
+    it('should return empty events when GPT returns no events field', async () => {
+      mockCreate.mockResolvedValue({
+        choices: [{ message: { content: '{}' } }]
+      })
+
+      const result = await extractEvents(sampleImageBuffer, sampleContentType)
+
+      expect(result.events).toEqual([])
+    })
+
+    it('should return empty events when events field is null', async () => {
+      mockCreate.mockResolvedValue({
+        choices: [{ message: { content: '{"events": null}' } }]
+      })
+
+      const result = await extractEvents(sampleImageBuffer, sampleContentType)
+
+      expect(result.events).toEqual([])
+    })
   })
 
   describe('event field coverage', () => {

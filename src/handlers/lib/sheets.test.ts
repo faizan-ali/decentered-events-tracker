@@ -194,8 +194,15 @@ describe('formatCost', () => {
       expect(formatCost('15.00')).toBe('$15.00')
     })
 
-    it('should extract numbers from mixed strings', () => {
-      expect(formatCost('About 25 dollars')).toBe('$25')
+    it('should format price ranges', () => {
+      expect(formatCost('5-50')).toBe('$5-50')
+      expect(formatCost('10-25')).toBe('$10-25')
+      expect(formatCost('15.00-30.00')).toBe('$15.00-30.00')
+    })
+
+    it('should preserve ambiguous cost strings as-is', () => {
+      expect(formatCost('About 25 dollars')).toBe('About 25 dollars')
+      expect(formatCost('Sliding scale 5-50 suggested')).toBe('Sliding scale 5-50 suggested')
     })
   })
 
@@ -368,15 +375,15 @@ describe('addEventsToSpreadsheet', () => {
         requestBody: {
           values: [
             [
-              '03/15/2025',                        // A: date (MM/DD/YYYY)
-              'Test Event',                        // B: eventName
-              'Music',                             // C: type
-              '7:00 PM',                           // D: startTime (12h format)
-              '10:00 PM',                          // E: endTime (12h format)
-              'San Francisco',                     // F: location
-              '123 Main St',                       // G: address
-              'A test event',                      // H: description
-              '$20',                               // I: cost
+              '03/15/2025', // A: date (MM/DD/YYYY)
+              'Test Event', // B: eventName
+              'Music', // C: type
+              '7:00 PM', // D: startTime (12h format)
+              '10:00 PM', // E: endTime (12h format)
+              'San Francisco', // F: location
+              '123 Main St', // G: address
+              'A test event', // H: description
+              '$20', // I: cost
               'https://s3.example.com/images/flyer.png' // J: link (s3Url)
             ]
           ]
@@ -387,10 +394,12 @@ describe('addEventsToSpreadsheet', () => {
 
   it('should include s3Url as link column (J) for each event in a group', async () => {
     const s3Url = 'https://bucket.s3.amazonaws.com/images/event.jpg'
-    await addEventsToSpreadsheet([{
-      events: [sampleEvent, { ...sampleEvent, title: 'Second Event' }],
-      s3Url
-    }])
+    await addEventsToSpreadsheet([
+      {
+        events: [sampleEvent, { ...sampleEvent, title: 'Second Event' }],
+        s3Url
+      }
+    ])
 
     const call = mockAppend.mock.calls[0][0]
     const rows = call.requestBody.values
@@ -423,15 +432,15 @@ describe('addEventsToSpreadsheet', () => {
     await addEventsToSpreadsheet([{ events: [nullEvent], s3Url: 'https://example.com/img.png' }])
 
     const row = mockAppend.mock.calls[0][0].requestBody.values[0]
-    expect(row[0]).toBe('')           // A: date — null startDay
-    expect(row[1]).toBe('Null Test')  // B: eventName
-    expect(row[2]).toBe('')           // C: type
-    expect(row[3]).toBe('')           // D: startTime — null
-    expect(row[4]).toBe('')           // E: endTime — null
-    expect(row[5]).toBe('')           // F: location
-    expect(row[6]).toBe('')           // G: address
-    expect(row[7]).toBe('')           // H: description
-    expect(row[8]).toBe('Unknown')    // I: cost — null becomes Unknown
+    expect(row[0]).toBe('') // A: date — null startDay
+    expect(row[1]).toBe('Null Test') // B: eventName
+    expect(row[2]).toBe('') // C: type
+    expect(row[3]).toBe('') // D: startTime — null
+    expect(row[4]).toBe('') // E: endTime — null
+    expect(row[5]).toBe('') // F: location
+    expect(row[6]).toBe('') // G: address
+    expect(row[7]).toBe('') // H: description
+    expect(row[8]).toBe('Unknown') // I: cost — null becomes Unknown
     expect(row[9]).toBe('https://example.com/img.png') // J: link
   })
 
@@ -522,6 +531,24 @@ describe('addEventsToSpreadsheet', () => {
     await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
 
     expect(consoleSpy).toHaveBeenCalledWith('All events already exist in spreadsheet, skipping append')
+  })
+
+  it('should not dedupe events with empty dates against each other', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    // Existing event with no date
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [['', 'Art Show', '', '', '', '', '123 Main St', '', '', '']]
+      }
+    })
+
+    // New event also with no date but same title
+    const undatedEvent = { ...sampleEvent, title: 'Art Show', startDay: null, endDay: null }
+    await addEventsToSpreadsheet([{ events: [undatedEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
+    expect(mockAppend).toHaveBeenCalled()
   })
 
   it('should fuzzy match addresses with different abbreviations', async () => {

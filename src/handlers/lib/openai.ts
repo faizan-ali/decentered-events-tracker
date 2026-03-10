@@ -40,14 +40,29 @@ export async function extractEvents(imageBuffer: Buffer, fileType: string): Prom
     response_format: { type: 'json_object' }
   })
 
-  const result = JSON.parse(response.choices[0].message.content!) as GPTResponse
+  const content = response.choices[0].message.content
+  if (!content) {
+    return { events: [] }
+  }
 
-  result.events = result.events.map(event => {
-    return {
-      ...event,
-      endDay: event.endDay || event.startDay
-    }
-  })
+  const result = JSON.parse(content) as GPTResponse
+
+  if (!Array.isArray(result.events)) {
+    return { events: [] }
+  }
+
+  result.events = result.events.map(event => ({
+    title: event.title || '',
+    address: event.address || '',
+    location: event.location || 'Other',
+    type: event.type || 'Something Else',
+    startDay: event.startDay || null,
+    startTime: event.startTime || null,
+    description: event.description || '',
+    cost: event.cost || null,
+    endDay: event.endDay || event.startDay || null,
+    endTime: event.endTime || null
+  }))
 
   return result
 }

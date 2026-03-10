@@ -105,8 +105,14 @@ export function formatCost(costString: string | null): string {
     return costString
   }
 
-  // Try to parse as number and add $ sign
-  const numMatch = cost.match(/(\d+(?:\.\d{2})?)/)
+  // If it looks like a range (e.g. "5-50", "10-25"), format as "$5-50"
+  const rangeMatch = cost.match(/^(\d+(?:\.\d{2})?)\s*[-–—]\s*(\d+(?:\.\d{2})?)$/)
+  if (rangeMatch) {
+    return `$${rangeMatch[1]}-${rangeMatch[2]}`
+  }
+
+  // Try to parse as a standalone number and add $ sign
+  const numMatch = cost.match(/^(\d+(?:\.\d{2})?)$/)
   if (numMatch) {
     return `$${numMatch[1]}`
   }
@@ -259,6 +265,9 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
     const newDate = event.date.toLowerCase().trim()
     const newTitle = normalizeText(event.eventName)
     const newAddress = normalizeAddress(event.address)
+
+    // Can't meaningfully dedupe events without a date — always allow them through
+    if (!newDate) return true
 
     const isDupe = existingEvents.some(existing => existing.date === newDate && isFuzzyMatch(existing.title, newTitle) && isFuzzyMatch(existing.address, newAddress))
     return !isDupe

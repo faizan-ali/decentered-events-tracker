@@ -36,7 +36,7 @@ describe('uploadToS3', () => {
   }
 
   describe('successful uploads', () => {
-    it('should upload buffer to S3 and return URL', async () => {
+    it('should upload buffer to S3 and return URL with timestamp prefix', async () => {
       const uploadToS3 = await getUploadToS3()
       mockSend.mockResolvedValue({})
 
@@ -46,10 +46,10 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(buffer, filename, contentType)
 
-      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/test-image.png')
+      expect(result).toMatch(/^https:\/\/test-bucket\.s3\.us-west-1\.amazonaws\.com\/images\/\d+_test-image\.png$/)
     })
 
-    it('should upload with correct S3 key format', async () => {
+    it('should upload with correct S3 key format including timestamp', async () => {
       const uploadToS3 = await getUploadToS3()
       mockSend.mockResolvedValue({})
 
@@ -60,7 +60,7 @@ describe('uploadToS3', () => {
 
       expect(mockSend).toHaveBeenCalledWith(
         expect.objectContaining({
-          Key: 'images/my-flyer.jpg'
+          Key: expect.stringMatching(/^images\/\d+_my-flyer\.jpg$/)
         })
       )
     })
@@ -191,7 +191,7 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), 'image.png', 'image/png')
 
-      expect(result).toBe('https://my-bucket.s3.us-west-1.amazonaws.com/images/image.png')
+      expect(result).toMatch(/^https:\/\/my-bucket\.s3\.us-west-1\.amazonaws\.com\/images\/\d+_image\.png$/)
     })
 
     it('should generate correct URL for us-east-1 region', async () => {
@@ -203,7 +203,21 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), 'photo.jpg', 'image/jpeg')
 
-      expect(result).toBe('https://east-bucket.s3.us-east-1.amazonaws.com/images/photo.jpg')
+      expect(result).toMatch(/^https:\/\/east-bucket\.s3\.us-east-1\.amazonaws\.com\/images\/\d+_photo\.jpg$/)
+    })
+
+    it('should include timestamp prefix to avoid collisions', async () => {
+      const uploadToS3 = await getUploadToS3()
+      mockSend.mockResolvedValue({})
+
+      await uploadToS3(Buffer.from('test'), 'flyer.png', 'image/png')
+
+      // Key should have format: images/{timestamp}_flyer.png
+      const key = mockSend.mock.calls[0][0].Key
+      expect(key).toMatch(/^images\/\d+_flyer\.png$/)
+      // Timestamp should be recent (within last second)
+      const ts = Number.parseInt(key.split('/')[1].split('_')[0])
+      expect(Math.abs(ts - Date.now())).toBeLessThan(1000)
     })
 
     it('should sanitize filenames with spaces in S3 key', async () => {
@@ -212,10 +226,10 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), 'my image file.png', 'image/png')
 
-      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/my_image_file.png')
+      expect(result).toMatch(/^https:\/\/test-bucket\.s3\.us-west-1\.amazonaws\.com\/images\/\d+_my_image_file\.png$/)
       expect(mockSend).toHaveBeenCalledWith(
         expect.objectContaining({
-          Key: 'images/my_image_file.png'
+          Key: expect.stringMatching(/^\images\/\d+_my_image_file\.png$/)
         })
       )
     })
@@ -226,7 +240,7 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), 'Screenshot 2026-03-09 at 12.01.13 PM.png', 'image/png')
 
-      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/Screenshot_2026-03-09_at_12.01.13_PM.png')
+      expect(result).toMatch(/^https:\/\/test-bucket\.s3\.us-west-1\.amazonaws\.com\/images\/\d+_Screenshot_2026-03-09_at_12\.01\.13_PM\.png$/)
     })
 
     it('should preserve safe characters in filenames', async () => {
@@ -235,7 +249,7 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), 'image-2025_03.png', 'image/png')
 
-      expect(result).toContain('image-2025_03.png')
+      expect(result).toMatch(/\d+_image-2025_03\.png$/)
     })
   })
 
@@ -325,7 +339,7 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(emptyBuffer, 'empty.png', 'image/png')
 
-      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/empty.png')
+      expect(result).toMatch(/^https:\/\/test-bucket\.s3\.us-west-1\.amazonaws\.com\/images\/\d+_empty\.png$/)
       expect(mockSend).toHaveBeenCalledWith(
         expect.objectContaining({
           Body: emptyBuffer
@@ -353,7 +367,7 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), longFilename, 'image/png')
 
-      expect(result).toContain(`${'a'.repeat(200)}.png`)
+      expect(result).toMatch(/\d+_a{200}\.png$/)
     })
 
     it('should sanitize parentheses and brackets in filenames', async () => {
@@ -362,7 +376,7 @@ describe('uploadToS3', () => {
 
       const result = await uploadToS3(Buffer.from('test'), 'image (1) [copy].png', 'image/png')
 
-      expect(result).toBe('https://test-bucket.s3.us-west-1.amazonaws.com/images/image__1___copy_.png')
+      expect(result).toMatch(/^https:\/\/test-bucket\.s3\.us-west-1\.amazonaws\.com\/images\/\d+_image__1___copy_\.png$/)
     })
   })
 })

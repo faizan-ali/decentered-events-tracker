@@ -11,7 +11,7 @@ function sanitizeFilename(filename: string): string {
 
 export async function uploadToS3(buffer: Buffer, filename: string, contentType: string): Promise<string> {
   const sanitized = sanitizeFilename(filename)
-  const s3Key = `images/${sanitized}`
+  const s3Key = `images/${Date.now()}_${sanitized}`
 
   const uploadCommand = new PutObjectCommand({
     Bucket: S3_BUCKET,
