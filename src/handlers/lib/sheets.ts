@@ -260,18 +260,23 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
   const existingEvents = await getExistingEvents(sheets, spreadsheetId)
   console.log(`Found ${existingEvents.length} existing events in spreadsheet`)
 
-  // Filter out duplicates using fuzzy matching on title and address
-  const newEvents = allFormattedEvents.filter(event => {
+  // Filter out duplicates using fuzzy matching on title and address. Accepted
+  // events are added to the comparison set so the batch also dedupes against
+  // itself (e.g. the same event on two flyers in one email).
+  const newEvents: FormattedEventRow[] = []
+  for (const event of allFormattedEvents) {
     const newDate = event.date.toLowerCase().trim()
     const newTitle = normalizeText(event.eventName)
     const newAddress = normalizeAddress(event.address)
 
     // Can't meaningfully dedupe events without a date — always allow them through
-    if (!newDate) return true
-
-    const isDupe = existingEvents.some(existing => existing.date === newDate && isFuzzyMatch(existing.title, newTitle) && isFuzzyMatch(existing.address, newAddress))
-    return !isDupe
-  })
+    if (newDate) {
+      const isDupe = existingEvents.some(existing => existing.date === newDate && isFuzzyMatch(existing.title, newTitle) && isFuzzyMatch(existing.address, newAddress))
+      if (isDupe) continue
+      existingEvents.push({ date: newDate, title: newTitle, address: newAddress })
+    }
+    newEvents.push(event)
+  }
 
   const dupeCount = allFormattedEvents.length - newEvents.length
   if (dupeCount > 0) {

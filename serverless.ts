@@ -17,7 +17,9 @@ const serverlessConfiguration: AWS = {
       GOOGLE_PRIVATE_KEY: '${env:GOOGLE_PRIVATE_KEY}',
       S3_BUCKET: '${env:S3_BUCKET}',
       REGION: '${env:REGION}',
-      INBOUND_API_KEY: '${env:INBOUND_API_KEY}'
+      INBOUND_API_KEY: '${env:INBOUND_API_KEY}',
+      ALERT_EMAIL_FROM: '${env:ALERT_EMAIL_FROM}',
+      ALERT_EMAIL_TO: '${env:ALERT_EMAIL_TO}'
     }
   },
 

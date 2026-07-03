@@ -2,7 +2,12 @@ import OpenAI from 'openai'
 import { PROMPT } from './prompt'
 
 export const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
+  // SDK defaults (10 min timeout, 2 auto-retries) can blow the 29s API Gateway
+  // budget → 504 → inbound.new redelivers → every image billed again. GPT-5.4
+  // typically answers in 3-4s; a failure here triggers the failure alert instead.
+  timeout: 20_000,
+  maxRetries: 0
 })
 
 interface GPTResponse {

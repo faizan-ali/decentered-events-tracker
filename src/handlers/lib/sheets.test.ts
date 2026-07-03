@@ -489,6 +489,19 @@ describe('addEventsToSpreadsheet', () => {
     expect(mockAppend).not.toHaveBeenCalled()
   })
 
+  it('should dedupe the same event appearing twice within one batch (e.g. two flyers in one email)', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    await addEventsToSpreadsheet([
+      { events: [sampleEvent], s3Url: 'https://example.com/flyer1.png' },
+      { events: [{ ...sampleEvent }], s3Url: 'https://example.com/flyer2.png' }
+    ])
+
+    expect(consoleSpy).toHaveBeenCalledWith('Filtered out 1 duplicate events')
+    expect(mockAppend).toHaveBeenCalledTimes(1)
+    expect(mockAppend.mock.calls[0][0].requestBody.values).toHaveLength(1)
+  })
+
   it('should allow events with same title but different date', async () => {
     const consoleSpy = vi.spyOn(console, 'log')
 

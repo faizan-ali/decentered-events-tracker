@@ -15,6 +15,12 @@ vi.mock('./lib/sheets', () => ({
   addEventsToSpreadsheet: vi.fn()
 }))
 
+vi.mock('./lib/alert', () => ({
+  sendFailureAlert: vi.fn(),
+  sendOpsAlert: vi.fn()
+}))
+
+import { sendFailureAlert, sendOpsAlert } from './lib/alert'
 import { extractEvents } from './lib/openai'
 import { uploadToS3 } from './lib/s3'
 import { addEventsToSpreadsheet } from './lib/sheets'
@@ -22,10 +28,20 @@ import { addEventsToSpreadsheet } from './lib/sheets'
 const mockExtractEvents = extractEvents as ReturnType<typeof vi.fn>
 const mockUploadToS3 = uploadToS3 as ReturnType<typeof vi.fn>
 const mockAddEventsToSpreadsheet = addEventsToSpreadsheet as ReturnType<typeof vi.fn>
+const mockSendFailureAlert = sendFailureAlert as ReturnType<typeof vi.fn>
+const mockSendOpsAlert = sendOpsAlert as ReturnType<typeof vi.fn>
 
 // Mock global fetch for attachment downloads
 const mockFetch = vi.fn()
 vi.stubGlobal('fetch', mockFetch)
+
+// A minimal valid PNG (signature + padding) so downloadDriveImage's image check passes
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13])
+const imageResponse = () => ({
+  ok: true,
+  headers: { get: () => 'image/png' },
+  arrayBuffer: () => Promise.resolve(PNG_BYTES.buffer)
+})
 
 const mockContext: Context = {
   callbackWaitsForEmptyEventLoop: false,
@@ -42,7 +58,7 @@ const mockContext: Context = {
   succeed: () => {}
 }
 
-function makePayload(overrides: Partial<{ attachments: any[] }> = {}): InboundWebhookPayload {
+function makePayload(overrides: Partial<{ attachments: any[]; htmlBody: string | null; textBody: string | null }> = {}): InboundWebhookPayload {
   return {
     event: 'email.received',
     timestamp: '2026-03-08T10:00:00Z',
@@ -65,8 +81,8 @@ function makePayload(overrides: Partial<{ attachments: any[] }> = {}): InboundWe
         replyTo: null,
         inReplyTo: undefined,
         references: undefined,
-        textBody: 'Check out this event',
-        htmlBody: '<p>Check out this event</p>',
+        textBody: overrides.textBody ?? 'Check out this event',
+        htmlBody: overrides.htmlBody ?? '<p>Check out this event</p>',
         raw: '',
         attachments: overrides.attachments ?? [],
         headers: {},
@@ -167,10 +183,9 @@ describe('parseInboundEmail', () => {
     vi.clearAllMocks()
     mockUploadToS3.mockResolvedValue('https://bucket.s3.amazonaws.com/images/test.png')
     mockAddEventsToSpreadsheet.mockResolvedValue(undefined)
-    mockFetch.mockResolvedValue({
-      ok: true,
-      arrayBuffer: () => Promise.resolve(new ArrayBuffer(8))
-    })
+    mockSendFailureAlert.mockResolvedValue(undefined)
+    mockSendOpsAlert.mockResolvedValue(undefined)
+    mockFetch.mockResolvedValue(imageResponse())
   })
 
   afterEach(() => {
@@ -248,7 +263,8 @@ describe('parseInboundEmail', () => {
         body: JSON.stringify({ message: 'Email parsed successfully' })
       })
       expect(mockFetch).toHaveBeenCalledWith(sampleAttachment.downloadUrl, {
-        headers: { Authorization: `Bearer ${process.env.INBOUND_API_KEY}` }
+        headers: { Authorization: `Bearer ${process.env.INBOUND_API_KEY}` },
+        signal: expect.any(AbortSignal)
       })
       expect(mockExtractEvents).toHaveBeenCalledWith(expect.any(Buffer), 'image/png')
     })
@@ -283,11 +299,7 @@ describe('parseInboundEmail', () => {
       const event = createEvent(payload)
       await parseInboundEmail(event, mockContext, () => {})
 
-      expect(mockAddEventsToSpreadsheet).toHaveBeenCalledWith(
-        expect.arrayContaining([
-          expect.objectContaining({ s3Url: 'https://bucket.s3.amazonaws.com/images/test.png' })
-        ])
-      )
+      expect(mockAddEventsToSpreadsheet).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ s3Url: 'https://bucket.s3.amazonaws.com/images/test.png' })]))
     })
 
     it('should not call addEventsToSpreadsheet when no events extracted', async () => {
@@ -298,6 +310,126 @@ describe('parseInboundEmail', () => {
       await parseInboundEmail(event, mockContext, () => {})
 
       expect(mockAddEventsToSpreadsheet).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('drive-linked flyers', () => {
+    it('extracts events from Drive links in the body when there are no attachments', async () => {
+      const payload = makePayload({
+        attachments: [],
+        htmlBody: '<a href="https://drive.google.com/file/d/FILE_A">a</a><a href="https://drive.google.com/file/d/FILE_B">b</a>'
+      })
+      mockExtractEvents.mockResolvedValue(sampleEvents)
+
+      const event = createEvent(payload)
+      const result = await parseInboundEmail(event, mockContext, () => {})
+
+      expect(result?.statusCode).toBe(200)
+      expect(mockFetch).toHaveBeenCalledWith('https://drive.google.com/thumbnail?id=FILE_A&sz=w2000', { signal: expect.any(AbortSignal) })
+      expect(mockFetch).toHaveBeenCalledWith('https://drive.google.com/thumbnail?id=FILE_B&sz=w2000', { signal: expect.any(AbortSignal) })
+      expect(mockExtractEvents).toHaveBeenCalledTimes(2)
+      expect(mockAddEventsToSpreadsheet).toHaveBeenCalled()
+    })
+
+    it('processes both attachments and Drive links in one email', async () => {
+      const payload = makePayload({
+        attachments: [sampleAttachment],
+        textBody: 'flyer: https://drive.google.com/file/d/FILE_C'
+      })
+      mockExtractEvents.mockResolvedValue(sampleEvents)
+
+      const event = createEvent(payload)
+      const result = await parseInboundEmail(event, mockContext, () => {})
+
+      expect(result?.statusCode).toBe(200)
+      expect(mockExtractEvents).toHaveBeenCalledTimes(2)
+    })
+
+    it('continues processing if one Drive image download fails', async () => {
+      const payload = makePayload({
+        attachments: [],
+        htmlBody: 'https://drive.google.com/file/d/FILE_A https://drive.google.com/file/d/FILE_B'
+      })
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 403, statusText: 'Forbidden' }).mockResolvedValueOnce(imageResponse())
+      mockExtractEvents.mockResolvedValue(sampleEvents)
+
+      const event = createEvent(payload)
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const result = await parseInboundEmail(event, mockContext, () => {})
+
+      expect(result?.statusCode).toBe(200)
+      expect(mockExtractEvents).toHaveBeenCalledTimes(1)
+      expect(mockSendFailureAlert).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([expect.stringContaining('https://drive.google.com/file/d/FILE_A')]))
+
+      consoleSpy.mockRestore()
+    })
+
+    it('returns 500 when a minimal payload alert fails, so inbound.new redelivers', async () => {
+      const payload = makePayload()
+      payload.email = { ...payload.email, id: 'inbnd_minimal_abc123', from: null, parsedData: null } as any
+      mockSendFailureAlert.mockRejectedValue(new Error('send failed'))
+
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const result = await parseInboundEmail(createEvent(payload), mockContext, () => {})
+
+      expect(result?.statusCode).toBe(500)
+      consoleSpy.mockRestore()
+    })
+
+    it('handles null attachments and missing contentType without crashing', async () => {
+      const payload = makePayload()
+      payload.email.parsedData = { ...payload.email.parsedData, attachments: null } as any
+      const nullAttachments = await parseInboundEmail(createEvent(payload), mockContext, () => {})
+      expect(nullAttachments?.statusCode).toBe(200)
+
+      const noContentType = makePayload({ attachments: [{ ...sampleAttachment, contentType: undefined }] })
+      const result = await parseInboundEmail(createEvent(noContentType), mockContext, () => {})
+      expect(result?.statusCode).toBe(200)
+    })
+
+    it('detects a minimal payload by id prefix even when parsedData is present but empty', async () => {
+      // Reproduced 2026-07-03: the stub had parsedData with empty attachments,
+      // only `from` was null — field-nullness checks alone miss it
+      const payload = makePayload()
+      payload.email = { ...payload.email, id: 'inbnd_minimal_705794533d1028e8', from: null } as any
+
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const result = await parseInboundEmail(createEvent(payload), mockContext, () => {})
+
+      expect(result?.statusCode).toBe(200)
+      expect(mockSendFailureAlert).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([expect.stringContaining('inbnd_minimal_705794533d1028e8')]))
+      expect(mockAddEventsToSpreadsheet).not.toHaveBeenCalled()
+
+      consoleSpy.mockRestore()
+    })
+
+    it('alerts and returns 200 on a minimal payload (provider-side parse failure)', async () => {
+      const payload = makePayload()
+      // inbound.new minimal payload: null from, no parsedData
+      payload.email = { ...payload.email, id: 'inbnd_minimal_abc123', from: null, parsedData: null } as any
+
+      const event = createEvent(payload)
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const result = await parseInboundEmail(event, mockContext, () => {})
+
+      expect(result?.statusCode).toBe(200)
+      expect(mockSendFailureAlert).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([expect.stringContaining('inbnd_minimal_abc123')]))
+      expect(mockFetch).not.toHaveBeenCalled()
+      expect(mockAddEventsToSpreadsheet).not.toHaveBeenCalled()
+
+      consoleSpy.mockRestore()
+    })
+
+    it('does not alert when all images process successfully', async () => {
+      const payload = makePayload({ attachments: [sampleAttachment] })
+      mockExtractEvents.mockResolvedValue(sampleEvents)
+
+      const event = createEvent(payload)
+      await parseInboundEmail(event, mockContext, () => {})
+
+      expect(mockSendFailureAlert).not.toHaveBeenCalled()
     })
   })
 
@@ -366,6 +498,28 @@ describe('parseInboundEmail', () => {
       const result = await parseInboundEmail(event, mockContext, () => {})
 
       expect(result?.statusCode).toBe(500)
+    })
+
+    it('sends an ops alert from the top-level catch on unanticipated errors', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const result = await parseInboundEmail(createEvent('{}', { body: '{}' }), mockContext, () => {})
+
+      expect(result?.statusCode).toBe(500)
+      expect(mockSendOpsAlert).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('top-level catch'))
+
+      consoleSpy.mockRestore()
+    })
+
+    it('still returns 500 when the ops alert itself fails', async () => {
+      mockSendOpsAlert.mockRejectedValue(new Error('alert send failed'))
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const result = await parseInboundEmail(createEvent('{}', { body: '{}' }), mockContext, () => {})
+
+      expect(result?.statusCode).toBe(500)
+
+      consoleSpy.mockRestore()
     })
   })
 
