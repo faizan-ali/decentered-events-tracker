@@ -19,7 +19,28 @@ const serverlessConfiguration: AWS = {
       REGION: '${env:REGION}',
       INBOUND_API_KEY: '${env:INBOUND_API_KEY}',
       ALERT_EMAIL_FROM: '${env:ALERT_EMAIL_FROM}',
-      ALERT_EMAIL_TO: '${env:ALERT_EMAIL_TO}'
+      ALERT_EMAIL_TO: '${env:ALERT_EMAIL_TO}',
+      DRIVE_INBOX_FOLDER_ID: '${env:DRIVE_INBOX_FOLDER_ID}',
+      DRIVE_PROCESSED_FOLDER_ID: '${env:DRIVE_PROCESSED_FOLDER_ID}'
+    },
+    iam: {
+      role: {
+        statements: [
+          {
+            // Historically S3 access rode on the bucket's wide-open policy;
+            // grant it properly so the policy can be tightened to public-read
+            Effect: 'Allow',
+            Action: ['s3:PutObject'],
+            Resource: 'arn:aws:s3:::${env:S3_BUCKET}/images/*'
+          },
+          {
+            // Drive-inbox ledger + ops-alert throttle marker
+            Effect: 'Allow',
+            Action: ['s3:GetObject', 's3:PutObject'],
+            Resource: 'arn:aws:s3:::${env:S3_BUCKET}/drive-inbox/*'
+          }
+        ]
+      }
     }
   },
 
@@ -56,6 +77,16 @@ const serverlessConfiguration: AWS = {
           }
         }
       ]
+    },
+    pollDriveInbox: {
+      handler: 'src/handlers/drive-inbox.pollDriveInbox',
+      // No API Gateway on this path, so no 29s ceiling. rate > timeout plus
+      // reservedConcurrency: 1 guarantee runs never overlap, which is what
+      // makes the read-modify-write S3 ledger safe.
+      timeout: 120,
+      memorySize: 1536,
+      reservedConcurrency: 1,
+      events: [{ schedule: 'rate(5 minutes)' }]
     }
   },
 

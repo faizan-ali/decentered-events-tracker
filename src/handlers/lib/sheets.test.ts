@@ -388,7 +388,8 @@ describe('addEventsToSpreadsheet', () => {
             ]
           ]
         }
-      })
+      }),
+      expect.objectContaining({ timeout: expect.any(Number) })
     )
   })
 
@@ -471,6 +472,43 @@ describe('addEventsToSpreadsheet', () => {
     await addEventsToSpreadsheet([{ events: [] }, { events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
 
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Successfully added 1 events'))
+  })
+
+  it('should skip an entire group when an existing row link contains its sourceTag (exact crash-replay dedupe)', async () => {
+    const consoleSpy = vi.spyOn(console, 'log')
+
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [['', 'Undated Show', 'Music', '', '', 'SF', '', 'desc', '$20', 'https://bucket.s3.us-west-1.amazonaws.com/images/1751500000000_drive_abc123_flyer.png']]
+      }
+    })
+
+    // date-less event that fuzzy dedupe would let through — sourceTag must catch it
+    const undatedEvent = { ...sampleEvent, title: 'Undated Show', startDay: null, endDay: null, address: '' }
+    await addEventsToSpreadsheet([{ events: [undatedEvent], s3Url: 'https://example.com/new.png', sourceTag: 'drive_abc123_' }])
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('already-ingested source drive_abc123_'))
+    expect(mockAppend).not.toHaveBeenCalled()
+  })
+
+  it('should not skip a group whose sourceTag matches no existing link', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [
+          ['03/15/2025', 'Other Event', 'Music', '', '', 'SF', '9 Oak St', 'desc', '$5', 'https://bucket.s3.us-west-1.amazonaws.com/images/1751500000000_drive_zzz999_flyer.png']
+        ]
+      }
+    })
+
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/new.png', sourceTag: 'drive_abc123_' }])
+
+    expect(mockAppend).toHaveBeenCalledTimes(1)
+  })
+
+  it('should fetch columns A:J so the link column participates in dedupe', async () => {
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(mockGet).toHaveBeenCalledWith(expect.objectContaining({ range: 'A:J' }), expect.objectContaining({ timeout: expect.any(Number) }))
   })
 
   it('should filter out duplicate events based on date + title + address', async () => {

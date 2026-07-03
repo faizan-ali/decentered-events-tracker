@@ -75,6 +75,47 @@ export async function sendFailureAlert(email: InboundWebhookEmail, reasons: stri
   })
 }
 
+export interface DriveInboxFailure {
+  name: string
+  link: string
+  reason: string
+}
+
+// Sent when files dropped into the shared Drive inbox folder could not be
+// processed after retries (or are unprocessable, e.g. a dragged-in folder).
+// Failed files stay in the inbox; the fix is always "re-upload a fresh copy" —
+// we deliberately do NOT tell people to rename/edit the failed file, because
+// processing state lives in our ledger, not in the file.
+export async function sendDriveInboxFailureAlert(failures: DriveInboxFailure[], to: string[] = ALERT_TO): Promise<void> {
+  const reasonList = failures.map(f => `  - ${f.name}: ${f.reason}\n    ${f.link}`).join('\n')
+
+  const text = [
+    `${failures.length} file(s) in the Decentered Uploads folder could not be processed — their events were not added to the spreadsheet.`,
+    '',
+    reasonList,
+    '',
+    'To retry: fix the issue and upload a fresh copy of the file to the folder.',
+    'Tips: upload image files (screenshots, photos, PNG/JPEG) or one-page PDF flyers directly into',
+    'the folder — not inside a subfolder. Files that were processed successfully move to "processed".'
+  ].join('\n')
+
+  const html = `
+    <p><b>${failures.length} file(s)</b> in the Decentered Uploads folder could not be processed — their events were <b>not added to the spreadsheet</b>.</p>
+    <ul>${failures.map(f => `<li><a href="${escapeHtml(f.link)}">${escapeHtml(f.name)}</a>: ${escapeHtml(f.reason)}</li>`).join('')}</ul>
+    <p>To retry: fix the issue and upload a fresh copy of the file to the folder.</p>
+    <p>Tips: upload image files (screenshots, photos, PNG/JPEG) or one-page PDF flyers directly into
+    the folder — not inside a subfolder. Files that were processed successfully move to "processed".</p>
+  `
+
+  await client.emails.send({
+    from: ALERT_FROM,
+    to,
+    subject: `[decentered] Drive upload failed — ${failures.length} file(s) could not be processed`,
+    text,
+    html
+  })
+}
+
 // Deterministic signature matching against known failure modes — deliberately
 // NOT an LLM: the alert path must not depend on the services it reports on,
 // and confidently misclassifying a novel error would be worse than a raw trace.

@@ -199,6 +199,7 @@ interface ExistingEvent {
   date: string
   title: string
   address: string
+  link: string
 }
 
 // Fetch existing events from the spreadsheet for fuzzy dedupe
@@ -206,18 +207,24 @@ async function getExistingEvents(sheets: any, spreadsheetId: string): Promise<Ex
   const events: ExistingEvent[] = []
 
   try {
-    const result = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: 'A:G'
-    })
+    const result = await sheets.spreadsheets.values.get(
+      {
+        spreadsheetId,
+        range: 'A:J'
+      },
+      // Bounded: gaxios has no default timeout, and the Drive-poller path has
+      // no API Gateway ceiling backstopping a hung call
+      { timeout: 15_000 }
+    )
 
     const rows = result.data.values || []
     for (const row of rows) {
       const date = (row[0] || '').toLowerCase().trim()
       const title = normalizeText(row[1] || '')
       const address = normalizeAddress(row[6] || '')
+      const link = row[9] || ''
       if (date || title) {
-        events.push({ date, title, address })
+        events.push({ date, title, address, link })
       }
     }
   } catch (error) {
@@ -227,24 +234,19 @@ async function getExistingEvents(sheets: any, spreadsheetId: string): Promise<Ex
   return events
 }
 
-// Add events to Google Spreadsheet
-export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[]; s3Url?: string }>): Promise<void> {
+// Add events to Google Spreadsheet. A group's optional sourceTag is a
+// deterministic identity for the source file (e.g. `drive_<fileId>_`, which
+// the S3 key — and therefore the link column — embeds): if any existing row's
+// link contains it, this exact file was already ingested and the whole group
+// is skipped. This makes crash-replay idempotent even where fuzzy dedupe
+// leaks (date-less events bypass it; GPT re-extraction drifts).
+export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[]; s3Url?: string; sourceTag?: string }>): Promise<void> {
   if (!eventGroups.length) {
     console.log('No events to add to spreadsheet')
     return
   }
 
-  // Flatten all events from all groups
-  const allFormattedEvents: FormattedEventRow[] = []
-
-  for (const group of eventGroups) {
-    if (!group.events.length) continue
-
-    const formattedEvents = group.events.map(event => formatEventForSpreadsheet(event, group.s3Url || ''))
-    allFormattedEvents.push(...formattedEvents)
-  }
-
-  if (!allFormattedEvents.length) {
+  if (!eventGroups.some(group => group.events.length)) {
     console.log('No events to add to spreadsheet after processing')
     return
   }
@@ -260,6 +262,27 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
   const existingEvents = await getExistingEvents(sheets, spreadsheetId)
   console.log(`Found ${existingEvents.length} existing events in spreadsheet`)
 
+  // Flatten all events from all groups, skipping groups whose source file
+  // already produced rows
+  const allFormattedEvents: FormattedEventRow[] = []
+
+  for (const group of eventGroups) {
+    if (!group.events.length) continue
+
+    if (group.sourceTag && existingEvents.some(existing => existing.link.includes(group.sourceTag as string))) {
+      console.log(`Skipping ${group.events.length} event(s) from already-ingested source ${group.sourceTag}`)
+      continue
+    }
+
+    const formattedEvents = group.events.map(event => formatEventForSpreadsheet(event, group.s3Url || ''))
+    allFormattedEvents.push(...formattedEvents)
+  }
+
+  if (!allFormattedEvents.length) {
+    console.log('No events to add to spreadsheet after processing')
+    return
+  }
+
   // Filter out duplicates using fuzzy matching on title and address. Accepted
   // events are added to the comparison set so the batch also dedupes against
   // itself (e.g. the same event on two flyers in one email).
@@ -273,7 +296,7 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
     if (newDate) {
       const isDupe = existingEvents.some(existing => existing.date === newDate && isFuzzyMatch(existing.title, newTitle) && isFuzzyMatch(existing.address, newAddress))
       if (isDupe) continue
-      existingEvents.push({ date: newDate, title: newTitle, address: newAddress })
+      existingEvents.push({ date: newDate, title: newTitle, address: newAddress, link: event.link })
     }
     newEvents.push(event)
   }
@@ -304,14 +327,17 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
 
   try {
     // Append rows to the spreadsheet
-    const result = await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: 'A:J', // Columns A through J
-      valueInputOption: 'USER_ENTERED',
-      requestBody: {
-        values: rows
-      }
-    })
+    const result = await sheets.spreadsheets.values.append(
+      {
+        spreadsheetId,
+        range: 'A:J', // Columns A through J
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: rows
+        }
+      },
+      { timeout: 15_000 }
+    )
 
     console.log(`Successfully added ${rows.length} events to spreadsheet. Updated range: ${result.data.updates?.updatedRange}`)
   } catch (error) {

@@ -66,7 +66,7 @@ export async function downloadDriveImage(fileId: string): Promise<Buffer> {
 
 // Detect image bytes by magic number (PNG, JPEG, GIF, WebP) so we never forward
 // an HTML interstitial to the vision model.
-function isImageBuffer(buffer: Buffer): boolean {
+export function isImageBuffer(buffer: Buffer): boolean {
   if (buffer.length < 12) return false
   const hex4 = buffer.subarray(0, 4).toString('hex')
   if (hex4 === '89504e47') return true // PNG

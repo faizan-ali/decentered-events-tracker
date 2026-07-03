@@ -66,8 +66,20 @@ Events have: title, address, location (SF/Oakland/Berkeley/Other), type (from fi
 - The prompt in `lib/prompt.ts` must explicitly instruct the model to extract ALL events from images with multiple events (e.g. workshop series). Without this, the model may collapse them into one.
 - Attachments are not inline in the webhook — they must be downloaded via `downloadUrl` with `Authorization: Bearer` header.
 
+### Drive inbox (non-email ingestion path, July 2026)
+Liz drops flyer files into the shared Drive folder **"Decentered Uploads"** (`DRIVE_INBOX_FOLDER_ID`) instead of emailing them. `pollDriveInbox` (`src/handlers/drive-inbox.ts`) runs every 5 minutes via EventBridge (120s timeout — no API Gateway ceiling) and feeds the same lib pipeline.
+- **Auth:** the folder is shared (Editor) with the same service account used for Sheets; scope `https://www.googleapis.com/auth/drive`. The Drive API is enabled on the GCP project (it wasn't until July 2026 — a 403 "Drive API has not been used" means it got disabled again).
+- **Source of truth is the S3 ledger** (`s3://$S3_BUCKET/drive-inbox/state.json`), NOT Drive state: Liz owns the files she uploads and consumer Drive can refuse non-owner metadata writes/moves. Moving files to `processed/` is best-effort UX only. `reservedConcurrency: 1` + rate(5m) > timeout(120s) is what makes the read-modify-write ledger safe — do not weaken either without revisiting.
+- **Attempts are PRE-bumped** in the ledger before any download/GPT call so crashes (timeout, OOM) still count toward the 3-attempt cap. If the pre-bump save fails, the run aborts — processing without bookkeeping is unbounded GPT respend. Max 10 files per run.
+- **Downloads are thumbnail-first** (authenticated `thumbnailLink` rewritten to `=s2000`): Drive transcodes HEIC and renders PDF page 1, so those formats work without native deps. Raw `alt=media` only for OpenAI-native formats ≤15MB when no thumbnail exists yet (generation lags upload — that error is transient by design). Never trust HTTP 200 alone; magic-byte check everything.
+- **Exact crash-replay dedupe:** the S3 key embeds `drive_<fileId>_`, and `addEventsToSpreadsheet` skips any group whose `sourceTag` appears in an existing row's link column (fuzzy dedupe provably leaks: date-less events bypass it, and GPT re-extraction drifts).
+- **Failure taxonomy:** transient errors retry naturally next poll (no state change beyond attempts); permanent (folder dragged in, attempts exhausted) → mark `failed` + `alertPending` in ledger FIRST, then alert Liz (`sendDriveInboxFailureAlert`), then clear the flag — at-least-once alerting with no 5-minute alert loop. Failed files deliberately stay in the inbox; the fix is always "upload a fresh copy" (a file edited in place after processing is intentionally NOT reprocessed — the ledger keys on fileId).
+- **Ops alerts are throttled** (6h S3 marker, fail-open) because a broken dependency would otherwise email every 5 minutes.
+- **Logs:** `aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h --format short`
+- Grep-able outcome line per run: `Drive inbox poll complete: X processed, Y retrying, Z failed permanently` (or `nothing to do`).
+
 ### Environment Variables
-Required in `.env`: `OPENAI_API_KEY`, `GOOGLE_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `S3_BUCKET`, `REGION`, `INBOUND_API_KEY`
+Required in `.env`: `OPENAI_API_KEY`, `GOOGLE_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `S3_BUCKET`, `REGION`, `INBOUND_API_KEY`, `DRIVE_INBOX_FOLDER_ID`, `DRIVE_PROCESSED_FOLDER_ID`
 Note: webhook requests are NOT authenticated (decision July 2026: not needed). inbound.new does send `X-Webhook-Verification-Token` if this is ever revisited.
 Optional (have code defaults in `lib/alert.ts`): `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO` (comma-separated)
 
