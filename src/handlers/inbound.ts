@@ -1,6 +1,6 @@
 import type { APIGatewayProxyHandler, APIGatewayProxyResult } from 'aws-lambda'
 import type { InboundEmailAttachment, InboundWebhookPayload } from 'inboundemail'
-import { sendFailureAlert, sendOpsAlert } from './lib/alert'
+import { type AlertEmailInfo, sendFailureAlert, sendOpsAlert } from './lib/alert'
 import { downloadDriveImage, extractDriveFileIds } from './lib/drive'
 import { type Event, normalizeEvent } from './lib/events'
 import { extractEvents } from './lib/openai'
@@ -8,6 +8,16 @@ import { uploadToS3 } from './lib/s3'
 import { addEventsToSpreadsheet } from './lib/sheets'
 
 const INBOUND_API_KEY = process.env.INBOUND_API_KEY
+
+// Webhook payload → transport-neutral alert shape; fields can be null on
+// minimal payloads (provider-side parse failure)
+const toAlertInfo = (email: InboundWebhookPayload['email']): AlertEmailInfo => ({
+  from: email.parsedData?.from?.text ?? email.from?.text ?? 'unknown',
+  subject: email.subject || '(no subject)',
+  receivedAt: email.receivedAt ?? '',
+  textBody: email.parsedData?.textBody ?? '',
+  htmlBody: email.parsedData?.htmlBody ?? null
+})
 
 async function downloadAttachment(attachment: InboundEmailAttachment): Promise<Buffer> {
   const response = await fetch(attachment.downloadUrl, {
@@ -25,8 +35,9 @@ async function downloadAttachment(attachment: InboundEmailAttachment): Promise<B
 }
 
 // Upload one image to S3 (fire-and-forget) and extract its events in parallel,
-// pushing any normalized events onto the shared accumulator.
-async function processImage(content: Buffer, filename: string, contentType: string, allEvents: Array<{ events: Event[]; s3Url?: string }>): Promise<void> {
+// pushing any normalized events onto the shared accumulator. Shared with the
+// SES handler (ses-inbound.ts).
+export async function processImage(content: Buffer, filename: string, contentType: string, allEvents: Array<{ events: Event[]; s3Url?: string }>): Promise<void> {
   const [s3Url, events] = await Promise.all([
     uploadToS3(content, filename, contentType)
       .then(url => {
@@ -72,7 +83,7 @@ export const parseInboundEmail: APIGatewayProxyHandler = async (event): Promise<
     if (email.id?.startsWith('inbnd_minimal_') || !email.parsedData) {
       console.error(`Minimal/failed payload received (id: ${email.id}) — inbound.new could not parse the original email`)
       try {
-        await sendFailureAlert(email, [
+        await sendFailureAlert(toAlertInfo(email), [
           `inbound.new failed to ingest this email entirely (id: ${email.id}) — likely too large. The flyers were never received; ask the sender to re-send with fewer/smaller images.`
         ])
         console.log('Sent failure alert for unparseable email')
@@ -125,7 +136,7 @@ export const parseInboundEmail: APIGatewayProxyHandler = async (event): Promise<
 
     if (failures.length > 0) {
       try {
-        await sendFailureAlert(email, failures)
+        await sendFailureAlert(toAlertInfo(email), failures)
         console.log(`Sent failure alert for ${failures.length} unprocessed image(s)`)
       } catch (alertError) {
         console.error('Failed to send failure alert:', alertError)

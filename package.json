@@ -17,12 +17,14 @@
     "google-auth-library": "^10.1.0",
     "googleapis": "^144.0.0",
     "inboundemail": "^0.20.0",
+    "mailparser": "^3.9.12",
     "openai": "^4.0.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@serverless/typescript": "^3.38.0",
     "@types/aws-lambda": "^8.10.0",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^22.13.1",
     "@vitest/coverage-v8": "^2.1.0",
     "dotenv": "^16.5.0",

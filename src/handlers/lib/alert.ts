@@ -1,5 +1,14 @@
 import { Inbound } from 'inboundemail'
-import type { InboundWebhookEmail } from 'inboundemail'
+
+// Transport-neutral view of an email, so alerts work for both the inbound.new
+// webhook handler and the SES handler
+export interface AlertEmailInfo {
+  from: string
+  subject: string
+  receivedAt: string
+  textBody: string
+  htmlBody: string | null
+}
 
 const INBOUND_API_KEY = process.env.INBOUND_API_KEY
 const ALERT_FROM = process.env.ALERT_EMAIL_FROM ?? 'alerts@proteus.tools'
@@ -24,12 +33,11 @@ const escapeHtml = (s: string) => s.replace(/[&<>]/g, c => (c === '&' ? '&amp;' 
 // (e.g. private Google Drive links that require sign-in). Without this, such
 // emails return HTTP 200 and are silently dropped with no retry. The alert
 // forwards the original email so a human can re-share or re-send the flyers.
-export async function sendFailureAlert(email: InboundWebhookEmail, reasons: string[], to: string[] = ALERT_TO): Promise<void> {
-  // parsedData/from can be null on minimal payloads (provider-side parse failure)
-  const from = email.parsedData?.from?.text ?? email.from?.text ?? 'unknown'
+export async function sendFailureAlert(email: AlertEmailInfo, reasons: string[], to: string[] = ALERT_TO): Promise<void> {
+  const from = email.from || 'unknown'
   const subject = email.subject || '(no subject)'
-  const receivedAt = email.receivedAt ?? ''
-  const textBody = email.parsedData?.textBody ?? ''
+  const receivedAt = email.receivedAt
+  const textBody = email.textBody
 
   const reasonList = reasons.map(r => `  - ${r}`).join('\n')
 
@@ -63,7 +71,7 @@ export async function sendFailureAlert(email: InboundWebhookEmail, reasons: stri
     "Anyone with the link" and re-send.</p>
     <hr>
     <p><b>Original message:</b></p>
-    ${email.parsedData?.htmlBody ?? `<pre>${escapeHtml(textBody)}</pre>`}
+    ${email.htmlBody ?? `<pre>${escapeHtml(textBody)}</pre>`}
   `
 
   await client.emails.send({

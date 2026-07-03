@@ -66,6 +66,13 @@ Events have: title, address, location (SF/Oakland/Berkeley/Other), type (from fi
 - The prompt in `lib/prompt.ts` must explicitly instruct the model to extract ALL events from images with multiple events (e.g. workshop series). Without this, the model may collapse them into one.
 - Attachments are not inline in the webhook — they must be downloaded via `downloadUrl` with `Authorization: Bearer` header.
 
+### SES-native ingestion (migration in progress, branch `ses-migration`)
+Parallel receive path that bypasses inbound.new's ~28MB ingestion ceiling (SES accepts 40MB — more than Gmail can send):
+- **Flow:** `*@ses.proteus.tools` → MX `inbound-smtp.us-west-2.amazonaws.com` → SES receipt rule `decentered-inbound` (active) → raw MIME to s3://decentered-ses-inbox/inbox/`<messageId>` (30-day expiry) → Lambda `events-parser-ses-dev-parseSesEmail` (us-west-2, 120s timeout, 2GB) → same lib pipeline (mailparser replaces the webhook payload).
+- **Deploy:** `pnpm serverless deploy --config serverless.ses.ts`
+- **Logs:** `aws logs tail /aws/lambda/events-parser-ses-dev-parseSesEmail --region us-west-2 --since 1h --format short`
+- **Cutover (not done):** repoint `proteus.tools` MX from `inbound-smtp.us-east-2.amazonaws.com` (inbound.new) to `inbound-smtp.us-west-2.amazonaws.com` and add `proteus.tools` to the receipt rule recipients. Until then production traffic still flows through inbound.new. Alerts still SEND via inbound.new's API in both paths.
+
 ### Environment Variables
 Required in `.env`: `OPENAI_API_KEY`, `GOOGLE_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `S3_BUCKET`, `REGION`, `INBOUND_API_KEY`
 Note: webhook requests are NOT authenticated (decision July 2026: not needed). inbound.new does send `X-Webhook-Verification-Token` if this is ever revisited.

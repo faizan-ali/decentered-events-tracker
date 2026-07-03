@@ -1,4 +1,3 @@
-import type { InboundWebhookEmail } from 'inboundemail'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { mockSend } = vi.hoisted(() => ({ mockSend: vi.fn() }))
@@ -6,36 +5,15 @@ vi.mock('inboundemail', () => ({
   Inbound: vi.fn().mockImplementation(() => ({ emails: { send: mockSend } }))
 }))
 
-import { sendFailureAlert, sendOpsAlert } from './alert'
+import { type AlertEmailInfo, sendFailureAlert, sendOpsAlert } from './alert'
 
-function makeEmail(): InboundWebhookEmail {
+function makeEmail(): AlertEmailInfo {
   return {
-    id: 'email_123',
-    messageId: '<abc@example.com>',
-    from: { text: 'Liz Cahill <liz@decentered.org>', addresses: [{ address: 'liz@decentered.org', name: 'Liz Cahill' }] },
-    to: { text: 'decentered@proteus.tools', addresses: [{ address: 'decentered@proteus.tools', name: null }] },
-    recipient: 'decentered@proteus.tools',
+    from: 'Liz Cahill <liz@decentered.org>',
     subject: 'New flyers',
     receivedAt: '2026-06-29T20:31:22.622Z',
-    parsedData: {
-      messageId: '<abc@example.com>',
-      date: new Date('2026-06-29T20:31:22.622Z'),
-      subject: 'New flyers',
-      from: { text: 'Liz Cahill <liz@decentered.org>', addresses: [{ address: 'liz@decentered.org', name: 'Liz Cahill' }] },
-      to: { text: 'decentered@proteus.tools', addresses: [{ address: 'decentered@proteus.tools', name: null }] },
-      cc: null,
-      bcc: null,
-      replyTo: null,
-      inReplyTo: undefined,
-      references: undefined,
-      textBody: 'here are the flyers',
-      htmlBody: '<p>here are the flyers</p>',
-      raw: '',
-      attachments: [],
-      headers: {},
-      priority: undefined
-    },
-    cleanedContent: { html: null, text: null, hasHtml: false, hasText: false, attachments: [], headers: {} }
+    textBody: 'here are the flyers',
+    htmlBody: '<p>here are the flyers</p>'
   }
 }
 
@@ -58,9 +36,8 @@ describe('sendFailureAlert', () => {
     expect(arg.html).toContain('here are the flyers')
   })
 
-  it('handles minimal payloads with null from and parsedData', async () => {
-    const email = { ...makeEmail(), from: null, parsedData: null } as any
-    await sendFailureAlert(email, ['inbound.new failed to ingest this email'], ['me@example.com'])
+  it('falls back to "unknown"/defaults when fields are empty (minimal payloads)', async () => {
+    await sendFailureAlert({ from: '', subject: '', receivedAt: '', textBody: '', htmlBody: null }, ['inbound.new failed to ingest this email'], ['me@example.com'])
 
     expect(mockSend).toHaveBeenCalledTimes(1)
     const arg = mockSend.mock.calls[0][0]
