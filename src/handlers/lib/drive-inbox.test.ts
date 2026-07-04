@@ -90,9 +90,18 @@ describe('drive-inbox lib', () => {
 
     it('rethrows non-NoSuchKey errors (run must abort, not process unbookkept)', async () => {
       const { loadLedger } = await getLib()
-      mockS3Send.mockRejectedValue(new Error('AccessDenied'))
+      mockS3Send.mockRejectedValue(new Error('ThrottlingException'))
 
-      await expect(loadLedger()).rejects.toThrow('AccessDenied')
+      await expect(loadLedger()).rejects.toThrow('ThrottlingException')
+    })
+
+    it('wraps AccessDenied with a bootstrap diagnosis (missing s3:ListBucket makes absent keys 403)', async () => {
+      const { loadLedger } = await getLib()
+      const err = new Error('Access Denied')
+      err.name = 'AccessDenied'
+      mockS3Send.mockRejectedValue(err)
+
+      await expect(loadLedger()).rejects.toThrow(/s3:ListBucket/)
     })
   })
 
@@ -210,6 +219,44 @@ describe('drive-inbox lib', () => {
       mockGet.mockResolvedValue({ data: HTML_BYTES.buffer.slice(HTML_BYTES.byteOffset, HTML_BYTES.byteOffset + HTML_BYTES.byteLength) })
 
       await expect(downloadInboxImage(jpegFile)).rejects.toThrow(/not valid image bytes/)
+    })
+
+    it('falls back to raw download when the thumbnail fetch THROWS (network error, not just HTTP failure)', async () => {
+      const { downloadInboxImage } = await getLib()
+      const jpegFile = { ...imageFile, mimeType: 'image/jpeg' }
+      mockFetch.mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      mockGet.mockResolvedValue({ data: PNG_BYTES.buffer.slice(PNG_BYTES.byteOffset, PNG_BYTES.byteOffset + PNG_BYTES.byteLength) })
+
+      const result = await downloadInboxImage(jpegFile)
+
+      expect(result.contentType).toBe('image/jpeg')
+      expect(mockGet).toHaveBeenCalled()
+    })
+
+    it('falls back to raw download when the OAuth token fetch fails', async () => {
+      const { downloadInboxImage } = await getLib()
+      const jpegFile = { ...imageFile, mimeType: 'image/jpeg' }
+      mockGetAccessToken.mockRejectedValue(new Error('token endpoint down'))
+      mockGet.mockResolvedValue({ data: PNG_BYTES.buffer.slice(PNG_BYTES.byteOffset, PNG_BYTES.byteOffset + PNG_BYTES.byteLength) })
+
+      const result = await downloadInboxImage(jpegFile)
+
+      expect(result.contentType).toBe('image/jpeg')
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it('rewrites =wNNN-hNNN style thumbnail suffixes to =s2000, not just =sNNN', async () => {
+      const { downloadInboxImage } = await getLib()
+      const pdfFile = { ...imageFile, mimeType: 'application/pdf', thumbnailLink: 'https://lh3.googleusercontent.com/xyz=w200-h190-p-k-nu' }
+      mockFetch.mockResolvedValue({
+        ok: true,
+        headers: { get: () => 'image/jpeg' },
+        arrayBuffer: async () => PNG_BYTES.buffer.slice(PNG_BYTES.byteOffset, PNG_BYTES.byteOffset + PNG_BYTES.byteLength)
+      })
+
+      await downloadInboxImage(pdfFile)
+
+      expect(mockFetch).toHaveBeenCalledWith('https://lh3.googleusercontent.com/xyz=s2000', expect.anything())
     })
   })
 

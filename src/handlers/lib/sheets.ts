@@ -202,8 +202,12 @@ interface ExistingEvent {
   link: string
 }
 
-// Fetch existing events from the spreadsheet for fuzzy dedupe
-async function getExistingEvents(sheets: any, spreadsheetId: string): Promise<ExistingEvent[]> {
+// Fetch existing events from the spreadsheet for dedupe. failHard controls
+// what a read failure means: the email path prefers availability (append
+// without dedupe rather than bounce the webhook), but callers relying on the
+// exact sourceTag replay guarantee must abort instead — an empty read-back
+// silently voids that guarantee and duplicates rows.
+async function getExistingEvents(sheets: any, spreadsheetId: string, failHard: boolean): Promise<ExistingEvent[]> {
   const events: ExistingEvent[] = []
 
   try {
@@ -223,11 +227,14 @@ async function getExistingEvents(sheets: any, spreadsheetId: string): Promise<Ex
       const title = normalizeText(row[1] || '')
       const address = normalizeAddress(row[6] || '')
       const link = row[9] || ''
-      if (date || title) {
+      // link included: a row with empty date AND title can still carry the
+      // sourceTag in its link column, and must participate in exact dedupe
+      if (date || title || link) {
         events.push({ date, title, address, link })
       }
     }
   } catch (error) {
+    if (failHard) throw error
     console.error('Error fetching existing events for dedupe, proceeding without dedupe:', error)
   }
 
@@ -258,8 +265,15 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
 
   const sheets = await getAuthenticatedSheetsClient()
 
-  // Fetch existing events for fuzzy dedupe
-  const existingEvents = await getExistingEvents(sheets, spreadsheetId)
+  // Fetch existing events for dedupe. Groups carrying a sourceTag depend on
+  // the read-back for their exact replay guarantee, so a failed read must
+  // abort the append (the caller's retry loop handles it) instead of
+  // proceeding dedupe-blind.
+  const existingEvents = await getExistingEvents(
+    sheets,
+    spreadsheetId,
+    eventGroups.some(group => group.sourceTag)
+  )
   console.log(`Found ${existingEvents.length} existing events in spreadsheet`)
 
   // Flatten all events from all groups, skipping groups whose source file

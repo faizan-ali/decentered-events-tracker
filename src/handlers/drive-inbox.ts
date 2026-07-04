@@ -28,11 +28,14 @@ import { addEventsToSpreadsheet } from './lib/sheets'
 const MAX_FILES_PER_RUN = 10
 const MAX_ATTEMPTS = 3
 
-const driveLink = (fileId: string) => `https://drive.google.com/file/d/${fileId}`
+const driveLink = (file: { id: string; isFolder?: boolean }) => (file.isFolder ? `https://drive.google.com/drive/folders/${file.id}` : `https://drive.google.com/file/d/${file.id}`)
 
 function touch(ledger: Ledger, file: InboxFile): void {
   ledger[file.id] = ledger[file.id] ?? { attempts: 0, name: file.name, updatedAt: '' }
   ledger[file.id].name = file.name
+  // Persisted so a pending alert can still build the right kind of Drive
+  // link after the file has left the inbox
+  ledger[file.id].isFolder = file.isFolder
   ledger[file.id].updatedAt = new Date().toISOString()
 }
 
@@ -42,27 +45,32 @@ export const pollDriveInbox: ScheduledHandler = async () => {
     const listed = await listInboxFiles()
 
     // Prune ledger entries for files no longer in the inbox (moved to
-    // processed/, or deleted). If a file is ever dragged BACK into the inbox
-    // it gets reprocessed — the sheet's sourceTag dedupe absorbs that.
+    // processed/, or deleted) — EXCEPT failed entries whose alert is still
+    // pending: the alert is owed to a human even if the file was tidied away,
+    // and pruning it would silently swallow the failure. Those entries are
+    // pruned on a later poll, after the alert finally sends and clears the
+    // flag. If a file is ever dragged BACK into the inbox it gets
+    // reprocessed — the sheet's sourceTag dedupe absorbs that.
     const listedIds = new Set(listed.map(f => f.id))
-    for (const id of Object.keys(ledger)) {
-      if (!listedIds.has(id)) delete ledger[id]
+    for (const [id, entry] of Object.entries(ledger)) {
+      if (!listedIds.has(id) && !(entry.status === 'failed' && entry.alertPending)) delete ledger[id]
     }
 
-    // Alerts that failed to send on a previous run
-    const pendingAlertFiles = listed.filter(f => ledger[f.id]?.status === 'failed' && ledger[f.id]?.alertPending)
+    // Alerts that failed to send on a previous run — sourced from the ledger,
+    // not the listing, so they survive the file leaving the inbox
+    const pendingAlertEntries = Object.entries(ledger).filter(([, entry]) => entry.status === 'failed' && entry.alertPending)
 
     const unhandled = listed.filter(f => !ledger[f.id]?.status)
     const folders = unhandled.filter(f => f.isFolder)
     const exhausted = unhandled.filter(f => !f.isFolder && (ledger[f.id]?.attempts ?? 0) >= MAX_ATTEMPTS)
     const queue = unhandled.filter(f => !f.isFolder && (ledger[f.id]?.attempts ?? 0) < MAX_ATTEMPTS).slice(0, MAX_FILES_PER_RUN)
 
-    if (!queue.length && !folders.length && !exhausted.length && !pendingAlertFiles.length) {
+    if (!queue.length && !folders.length && !exhausted.length && !pendingAlertEntries.length) {
       console.log(`Drive inbox poll: nothing to do (${listed.length} file(s) listed, all handled)`)
       return
     }
 
-    console.log(`Drive inbox poll: ${queue.length} to process, ${folders.length} folder(s), ${exhausted.length} exhausted, ${pendingAlertFiles.length} pending alert(s)`)
+    console.log(`Drive inbox poll: ${queue.length} to process, ${folders.length} folder(s), ${exhausted.length} exhausted, ${pendingAlertEntries.length} pending alert(s)`)
 
     // Pre-bump attempts BEFORE any download/GPT. If this save fails, abort
     // the whole run: processing without bookkeeping is how unbounded GPT
@@ -73,7 +81,7 @@ export const pollDriveInbox: ScheduledHandler = async () => {
     }
     await saveLedger(ledger)
 
-    const eventGroups: Array<{ events: Event[]; s3Url?: string; sourceTag: string }> = []
+    const eventGroups: Array<{ events: Event[]; s3Url: string; sourceTag: string }> = []
     const succeeded: InboxFile[] = []
     const failedThisRun: Array<{ file: InboxFile; error: unknown }> = []
 
@@ -85,17 +93,15 @@ export const pollDriveInbox: ScheduledHandler = async () => {
 
           // The drive_<fileId>_ prefix survives into the S3 URL (sanitize
           // keeps [A-Za-z0-9_-], which covers Drive file IDs) and is the
-          // sheet's exact-dedupe key for this file
+          // sheet's exact-dedupe key for this file. Unlike the email path,
+          // an S3 upload failure FAILS the file (transient, retried next
+          // poll): appending rows with an empty link column would leave the
+          // replay-dedupe key permanently absent from the sheet.
           const [s3Url, extracted] = await Promise.all([
-            uploadToS3(buffer, `drive_${file.id}_${file.name}`, contentType)
-              .then(url => {
-                console.log(`Successfully uploaded ${file.name} to S3: ${url}`)
-                return url as string | undefined
-              })
-              .catch(s3Error => {
-                console.error(`Failed to upload ${file.name} to S3:`, s3Error)
-                return undefined
-              }),
+            uploadToS3(buffer, `drive_${file.id}_${file.name}`, contentType).then(url => {
+              console.log(`Successfully uploaded ${file.name} to S3: ${url}`)
+              return url
+            }),
             extractEvents(buffer, contentType)
           ])
 
@@ -133,7 +139,7 @@ export const pollDriveInbox: ScheduledHandler = async () => {
       ledger[file.id].lastError = 'is a folder'
       permanentFailures.push({
         name: file.name,
-        link: driveLink(file.id),
+        link: driveLink(file),
         reason: 'this is a folder — folders are not scanned, please upload the image files directly into the inbox'
       })
     }
@@ -141,7 +147,7 @@ export const pollDriveInbox: ScheduledHandler = async () => {
       touch(ledger, file)
       ledger[file.id].status = 'failed'
       ledger[file.id].alertPending = true
-      permanentFailures.push({ name: file.name, link: driveLink(file.id), reason: ledger[file.id].lastError ?? `could not be processed after ${MAX_ATTEMPTS} attempts` })
+      permanentFailures.push({ name: file.name, link: driveLink(file), reason: ledger[file.id].lastError ?? `could not be processed after ${MAX_ATTEMPTS} attempts` })
     }
     for (const { file, error } of failedThisRun) {
       touch(ledger, file)
@@ -150,7 +156,7 @@ export const pollDriveInbox: ScheduledHandler = async () => {
       if (ledger[file.id].attempts >= MAX_ATTEMPTS) {
         ledger[file.id].status = 'failed'
         ledger[file.id].alertPending = true
-        permanentFailures.push({ name: file.name, link: driveLink(file.id), reason: `failed ${MAX_ATTEMPTS} times, last error: ${message}` })
+        permanentFailures.push({ name: file.name, link: driveLink(file), reason: `failed ${MAX_ATTEMPTS} times, last error: ${message}` })
       }
     }
 
@@ -160,7 +166,7 @@ export const pollDriveInbox: ScheduledHandler = async () => {
 
     const alertItems: DriveInboxFailure[] = [
       ...permanentFailures,
-      ...pendingAlertFiles.map(f => ({ name: f.name, link: driveLink(f.id), reason: ledger[f.id].lastError ?? 'could not be processed' }))
+      ...pendingAlertEntries.map(([id, entry]) => ({ name: entry.name, link: driveLink({ id, isFolder: entry.isFolder }), reason: entry.lastError ?? 'could not be processed' }))
     ]
     if (alertItems.length) {
       try {

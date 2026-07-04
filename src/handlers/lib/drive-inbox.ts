@@ -13,6 +13,7 @@ import { JWT } from 'google-auth-library'
 import { type drive_v3, google } from 'googleapis'
 import { sendOpsAlert } from './alert'
 import { isImageBuffer } from './drive'
+import { withTimeout } from './timeout'
 
 const S3_BUCKET = process.env.S3_BUCKET
 const REGION = process.env.REGION
@@ -65,6 +66,7 @@ export interface LedgerEntry {
   status?: 'processed' | 'failed'
   alertPending?: boolean
   name: string
+  isFolder?: boolean
   lastError?: string
   updatedAt: string
 }
@@ -78,6 +80,17 @@ export async function loadLedger(): Promise<Ledger> {
     return body ? (JSON.parse(body) as Ledger) : {}
   } catch (error) {
     if (error instanceof Error && error.name === 'NoSuchKey') return {}
+    // S3 only returns NoSuchKey when the caller has s3:ListBucket on the
+    // bucket; without it a missing key 403s and bootstrap would brick every
+    // poll. The role grants ListBucket for exactly this reason — if it ever
+    // 403s again, make the ops alert diagnostic instead of guessing empty
+    // (guessing would reset attempts and unbound GPT respend if the ledger
+    // actually exists but GET is denied).
+    if (error instanceof Error && error.name === 'AccessDenied') {
+      throw new Error(
+        `Ledger GET AccessDenied — if drive-inbox/state.json is missing, this means the role lost s3:ListBucket (absent keys 403 without it). Original: ${error.message}`
+      )
+    }
     throw error
   }
 }
@@ -153,27 +166,41 @@ export async function listInboxFiles(): Promise<InboxFile[]> {
 // (generation lags upload; the caller's attempts counter absorbs the wait).
 export async function downloadInboxImage(file: InboxFile): Promise<{ buffer: Buffer; contentType: string }> {
   if (file.thumbnailLink) {
-    // thumbnailLink is short-lived (hours) — always fetched fresh from the
-    // listing, never cached. Default size suffix is =s220; request 2000px,
-    // the same bound the email path's public-thumbnail fetch uses.
-    const url = file.thumbnailLink.replace(/=s\d+(-c)?$/, '=s2000')
-    const { token } = await getJwtClient().getAccessToken()
-    const response = await fetch(url, {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)
-    })
-
-    if (response.ok) {
-      const contentType = response.headers.get('content-type') ?? ''
-      const buffer = Buffer.from(await response.arrayBuffer())
-      // Never trust status 200 alone: Google endpoints return HTML
-      // interstitials with 200 when auth is off
-      if (contentType.startsWith('image/') && isImageBuffer(buffer)) {
-        return { buffer, contentType }
+    // The whole thumbnail attempt is one try/catch: a network-level failure
+    // (abort, DNS) must fall through to the raw fallback exactly like an
+    // HTTP-level failure does — otherwise a transient thumbnail hiccup burns
+    // an attempt on a file raw download could have handled.
+    try {
+      // thumbnailLink is short-lived (hours) — always fetched fresh from the
+      // listing, never cached. Rewrite the size suffix (=sNNN or =wNNN-hNNN…
+      // forms) to 2000px, the same bound the email path's public-thumbnail
+      // fetch uses; an unrecognized suffix form is fetched as-is and logged.
+      const url = file.thumbnailLink.replace(/=[swh]\d[\w-]*$/, '=s2000')
+      if (url === file.thumbnailLink) {
+        console.warn(`Thumbnail link for ${file.id} has an unrecognized size suffix, fetching at default resolution: ${file.thumbnailLink}`)
       }
-      console.warn(`Thumbnail for ${file.id} returned non-image (${contentType}, ${buffer.length} bytes), trying raw download`)
-    } else {
-      console.warn(`Thumbnail fetch for ${file.id} failed: ${response.status} ${response.statusText}, trying raw download`)
+      // The OAuth token fetch has no native timeout (gaxios only arms one
+      // when asked) — bound it like every other outbound call here
+      const { token } = await withTimeout(getJwtClient().getAccessToken(), DRIVE_CALL_TIMEOUT_MS, 'OAuth token fetch')
+      const response = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)
+      })
+
+      if (response.ok) {
+        const contentType = response.headers.get('content-type') ?? ''
+        const buffer = Buffer.from(await response.arrayBuffer())
+        // Never trust status 200 alone: Google endpoints return HTML
+        // interstitials with 200 when auth is off
+        if (contentType.startsWith('image/') && isImageBuffer(buffer)) {
+          return { buffer, contentType }
+        }
+        console.warn(`Thumbnail for ${file.id} returned non-image (${contentType}, ${buffer.length} bytes), trying raw download`)
+      } else {
+        console.warn(`Thumbnail fetch for ${file.id} failed: ${response.status} ${response.statusText}, trying raw download`)
+      }
+    } catch (thumbError) {
+      console.warn(`Thumbnail fetch for ${file.id} threw (${thumbError instanceof Error ? thumbError.message : thumbError}), trying raw download`)
     }
   }
 

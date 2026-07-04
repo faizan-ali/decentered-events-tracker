@@ -511,6 +511,35 @@ describe('addEventsToSpreadsheet', () => {
     expect(mockGet).toHaveBeenCalledWith(expect.objectContaining({ range: 'A:J' }), expect.objectContaining({ timeout: expect.any(Number) }))
   })
 
+  it('should throw when the dedupe read fails and a group carries a sourceTag (exact replay guarantee must not silently degrade)', async () => {
+    mockGet.mockRejectedValueOnce(new Error('Sheets read timeout'))
+
+    await expect(addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png', sourceTag: 'drive_abc123_' }])).rejects.toThrow('Sheets read timeout')
+    expect(mockAppend).not.toHaveBeenCalled()
+  })
+
+  it('should proceed without dedupe on read failure when no group carries a sourceTag (email-path availability)', async () => {
+    mockGet.mockRejectedValueOnce(new Error('Sheets read timeout'))
+
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png' }])
+
+    expect(mockAppend).toHaveBeenCalledTimes(1)
+  })
+
+  it('should match a sourceTag against rows whose date and title are both empty (link-only rows)', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: {
+        values: [
+          ['', '', '', '', '', '', '', 'only a description survived extraction', '$10', 'https://bucket.s3.us-west-1.amazonaws.com/images/1751500000000_drive_abc123_flyer.png']
+        ]
+      }
+    })
+
+    await addEventsToSpreadsheet([{ events: [{ ...sampleEvent, title: '', startDay: null, endDay: null }], s3Url: 'https://example.com/new.png', sourceTag: 'drive_abc123_' }])
+
+    expect(mockAppend).not.toHaveBeenCalled()
+  })
+
   it('should filter out duplicate events based on date + title + address', async () => {
     const consoleSpy = vi.spyOn(console, 'log')
 

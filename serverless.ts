@@ -38,6 +38,14 @@ const serverlessConfiguration: AWS = {
             Effect: 'Allow',
             Action: ['s3:GetObject', 's3:PutObject'],
             Resource: 'arn:aws:s3:::${env:S3_BUCKET}/drive-inbox/*'
+          },
+          {
+            // Required for GetObject on a MISSING key to return 404 NoSuchKey
+            // instead of 403 AccessDenied — without this, first-run ledger
+            // bootstrap (and any state.json deletion) bricks the poller
+            Effect: 'Allow',
+            Action: ['s3:ListBucket'],
+            Resource: 'arn:aws:s3:::${env:S3_BUCKET}'
           }
         ]
       }

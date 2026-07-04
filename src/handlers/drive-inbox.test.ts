@@ -275,6 +275,53 @@ describe('pollDriveInbox', () => {
     expect(mockThrottledOpsAlert).not.toHaveBeenCalled()
   })
 
+  it('fails the file (transient) when the S3 upload fails, instead of appending rows with an empty link', async () => {
+    mockListInboxFiles.mockResolvedValue([file('f1')])
+    mockUploadToS3.mockRejectedValue(new Error('S3 500'))
+
+    await run()
+
+    expect(mockAddEvents).not.toHaveBeenCalled()
+    const final = ledgerSaves.at(-1)?.f1
+    expect(final?.status).toBeUndefined()
+    expect(final).toMatchObject({ attempts: 1, lastError: expect.stringContaining('S3 500') })
+    expect(mockMoveToProcessed).not.toHaveBeenCalled()
+  })
+
+  it('preserves failed+alertPending ledger entries when the file leaves the inbox, and still sends the alert', async () => {
+    // file is GONE from the listing but its alert was never delivered
+    mockListInboxFiles.mockResolvedValue([])
+    mockLoadLedger.mockResolvedValue({
+      gone: { attempts: 3, name: 'gone.png', updatedAt: 'earlier', status: 'failed', alertPending: true, lastError: 'broken' }
+    })
+
+    await run()
+
+    expect(mockDriveFailureAlert).toHaveBeenCalledWith([expect.objectContaining({ name: 'gone.png', reason: 'broken' })])
+    // entry survived the prune long enough to alert, and the flag cleared
+    expect(ledgerSaves.at(-1)?.gone).toMatchObject({ status: 'failed', alertPending: false })
+  })
+
+  it('prunes a failed entry once its alert has been delivered and the file is gone', async () => {
+    mockListInboxFiles.mockResolvedValue([file('other')])
+    mockLoadLedger.mockResolvedValue({
+      gone: { attempts: 3, name: 'gone.png', updatedAt: 'earlier', status: 'failed', alertPending: false }
+    })
+
+    await run()
+
+    expect(ledgerSaves.at(-1)?.gone).toBeUndefined()
+    expect(mockDriveFailureAlert).not.toHaveBeenCalled()
+  })
+
+  it('links folders with the /drive/folders/ URL form in alerts, not /file/d/', async () => {
+    mockListInboxFiles.mockResolvedValue([file('sub1', { name: 'July flyers', mimeType: 'application/vnd.google-apps.folder', isFolder: true, thumbnailLink: undefined })])
+
+    await run()
+
+    expect(mockDriveFailureAlert).toHaveBeenCalledWith([expect.objectContaining({ link: 'https://drive.google.com/drive/folders/sub1' })])
+  })
+
   it('sends a throttled ops alert on unexpected top-level errors', async () => {
     mockListInboxFiles.mockRejectedValue(new Error('Drive API disabled'))
 

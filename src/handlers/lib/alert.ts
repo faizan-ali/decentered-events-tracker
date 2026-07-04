@@ -1,5 +1,6 @@
 import { Inbound } from 'inboundemail'
 import type { InboundWebhookEmail } from 'inboundemail'
+import { withTimeout } from './timeout'
 
 const INBOUND_API_KEY = process.env.INBOUND_API_KEY
 const ALERT_FROM = process.env.ALERT_EMAIL_FROM ?? 'alerts@proteus.tools'
@@ -96,7 +97,7 @@ export async function sendDriveInboxFailureAlert(failures: DriveInboxFailure[], 
     '',
     'To retry: fix the issue and upload a fresh copy of the file to the folder.',
     'Tips: upload image files (screenshots, photos, PNG/JPEG) or one-page PDF flyers directly into',
-    'the folder — not inside a subfolder. Files that were processed successfully move to "processed".'
+    'the folder — not inside a subfolder. Files that were processed successfully usually move to "processed".'
   ].join('\n')
 
   const html = `
@@ -104,16 +105,23 @@ export async function sendDriveInboxFailureAlert(failures: DriveInboxFailure[], 
     <ul>${failures.map(f => `<li><a href="${escapeHtml(f.link)}">${escapeHtml(f.name)}</a>: ${escapeHtml(f.reason)}</li>`).join('')}</ul>
     <p>To retry: fix the issue and upload a fresh copy of the file to the folder.</p>
     <p>Tips: upload image files (screenshots, photos, PNG/JPEG) or one-page PDF flyers directly into
-    the folder — not inside a subfolder. Files that were processed successfully move to "processed".</p>
+    the folder — not inside a subfolder. Files that were processed successfully usually move to "processed".</p>
   `
 
-  await client.emails.send({
-    from: ALERT_FROM,
-    to,
-    subject: `[decentered] Drive upload failed — ${failures.length} file(s) could not be processed`,
-    text,
-    html
-  })
+  // Bounded: on the scheduled Drive-inbox path there is no API Gateway
+  // ceiling backstopping a hung inbound.new call, and an unbounded send here
+  // would block the ledger save that clears alertPending (duplicate alerts)
+  await withTimeout(
+    client.emails.send({
+      from: ALERT_FROM,
+      to,
+      subject: `[decentered] Drive upload failed — ${failures.length} file(s) could not be processed`,
+      text,
+      html
+    }),
+    15_000,
+    'Drive inbox failure alert send'
+  )
 }
 
 // Deterministic signature matching against known failure modes — deliberately
@@ -155,19 +163,27 @@ export async function sendOpsAlert(error: unknown, context: string): Promise<voi
   const matched = KNOWN_ISSUES.filter(issue => issue.pattern.test(message))
   const diagnosis = matched.length ? matched.map(issue => `Possible known issue: ${issue.note}`).join('\n\n') : UNKNOWN_CHECKLIST
 
-  await client.emails.send({
-    from: ALERT_FROM,
-    to: OPS_ALERT_TO,
-    subject: `[decentered] Handler error — ${context}`,
-    text: [
-      `Unhandled error in parseInboundEmail (${context}). An inbound email may have been dropped.`,
-      '',
-      diagnosis,
-      '',
-      detail,
-      '',
-      'The webhook returned 500, so inbound.new may redeliver; repeated identical alerts mean the retries are failing too.',
-      'Debug: aws logs tail /aws/lambda/events-parser-dev-parseInboundEmail --region us-west-1 --since 1h --format short'
-    ].join('\n')
-  })
+  // Bounded for the same reason as the Drive-inbox alert: the scheduled path
+  // has no external ceiling, and this is called from catch blocks where a
+  // hang would eat the rest of the Lambda budget
+  await withTimeout(
+    client.emails.send({
+      from: ALERT_FROM,
+      to: OPS_ALERT_TO,
+      subject: `[decentered] Handler error — ${context}`,
+      text: [
+        `Unhandled error (${context}). An inbound email or Drive upload may have been dropped.`,
+        '',
+        diagnosis,
+        '',
+        detail,
+        '',
+        'Webhook-path errors return 500 so inbound.new may redeliver; Drive-path errors retry on the next 5-minute poll. Repeated identical alerts mean the retries are failing too.',
+        'Debug: aws logs tail /aws/lambda/events-parser-dev-parseInboundEmail --region us-west-1 --since 1h --format short',
+        '       aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h --format short'
+      ].join('\n')
+    }),
+    15_000,
+    'Ops alert send'
+  )
 }
