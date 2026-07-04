@@ -4,9 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DecenteredArts Events Extractor - A serverless application that processes inbound emails containing event flyers/screenshots, uses GPT-5.4 vision to extract event details, and populates a Google Sheets tracker.
+DecenteredArts Events Extractor - A serverless application that ingests event flyers/screenshots, uses GPT-5.4 vision to extract event details, and populates a Google Sheets tracker. Two ingestion paths feed one shared extraction pipeline:
 
-**Pipeline:** Email with image → inbound.new webhook → AWS Lambda → download attachment → OpenAI GPT-5.4 Vision → Google Sheets + S3 archival
+**Path 1 — Email:** Email with image → inbound.new webhook → API Gateway → Lambda (`inbound.ts`) → download attachment → shared pipeline
+**Path 2 — Drive inbox (primary since July 2026):** Liz drops files in the shared "Decentered Uploads" Drive folder → EventBridge schedule (5 min) → Lambda (`drive-inbox.ts`) → download via Drive API → shared pipeline
+**Shared pipeline:** S3 archival + GPT-5.4 vision extraction → normalize → dedupe against sheet → append to Google Sheets
+
+### Key Files (index)
+- `src/handlers/inbound.ts` — email-path Lambda handler (`parseInboundEmail`)
+- `src/handlers/drive-inbox.ts` — Drive-path scheduled Lambda handler (`pollDriveInbox`): orchestration, ledger state machine, failure taxonomy
+- `src/handlers/lib/drive-inbox.ts` — Drive API client, S3 ledger load/save, thumbnail-first downloads, throttled ops alerts
+- `src/handlers/lib/drive.ts` — email-path Drive-LINK extraction (public thumbnail scrape; distinct from drive-inbox.ts) + `isImageBuffer` magic-byte check
+- `src/handlers/lib/openai.ts` — GPT-5.4 vision extraction (bounded client; injects today's Pacific date into the prompt)
+- `src/handlers/lib/prompt.ts` — `buildPrompt(today)`: extraction instructions incl. relative-date resolution ("TODAY 8PM" screenshots)
+- `src/handlers/lib/events.ts` — normalization (fills missing end times, cross-fills days)
+- `src/handlers/lib/sheets.ts` — fuzzy dedupe (Dice bigrams ≥0.75 on title/address + exact date) + exact `sourceTag` replay dedupe + append
+- `src/handlers/lib/s3.ts` — image archival (the S3 URL becomes the sheet's link column — and the Drive path's dedupe key)
+- `src/handlers/lib/alert.ts` — all email alerts via inbound.new: `sendFailureAlert` (email path, → Liz), `sendDriveInboxFailureAlert` (Drive path, → Liz), `sendOpsAlert` (→ maintainer)
+- `src/handlers/lib/timeout.ts` — `withTimeout` for SDKs with no native timeout knob
+- `serverless.ts` — stack config: both functions, IAM, CloudWatch alarms + SNS
 
 ## Common Commands
 
@@ -28,6 +44,17 @@ pnpm deploy:prod            # Deploy to AWS Lambda (deploys to us-west-1)
 curl -X POST -H "Content-Type: application/json" \
   -d '{"event":"email.received","timestamp":"...","email":{...},"endpoint":{...}}' \
   "<API_GATEWAY_URL>/dev/parse-inbound-email"
+
+# Drive inbox: watch runs / inspect state
+aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h --format short
+aws s3 cp s3://$S3_BUCKET/drive-inbox/state.json - --region us-west-1   # the ledger (source of truth)
+aws cloudwatch describe-alarms --alarm-name-prefix decentered --region us-west-1 --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}' --output table
+
+# Run the Drive poller locally against real services (careful: writes to the
+# real sheet/ledger and sends real alerts — override ALERT_EMAIL_TO and
+# ALERT_OPS_EMAIL_TO to yourself first)
+set -a && source .env && set +a && export ALERT_EMAIL_TO=<you> ALERT_OPS_EMAIL_TO=<you> \
+  && pnpm tsx -e "" # then: import { pollDriveInbox } from './src/handlers/drive-inbox' in a temp script (tsx -e cannot top-level await)
 ```
 
 ## Architecture
@@ -53,8 +80,8 @@ Events have: title, address, location (SF/Oakland/Berkeley/Other), type (from fi
 - **Region:** us-west-1
 - **Lambda:** `events-parser-dev-parseInboundEmail`
 - **API Gateway timeout:** 29s (hard AWS limit) — GPT-5.4 typically responds in 11-15s
-- **S3 bucket:** set via `S3_BUCKET` env var (us-west-1)
-- **Spreadsheet:** ~5700 existing rows, dedupe fetches columns A-G before appending
+- **S3 bucket:** set via `S3_BUCKET` env var (us-west-1). Prefixes: `images/` (public flyer archive, linked from the sheet), `drive-inbox/` (poller state — private)
+- **Spreadsheet:** ~6,900 existing rows; dedupe fetches columns A:J before appending (J = link column, carries the Drive path's exact-dedupe key)
 - **API Gateway:** `https://pek82om27g.execute-api.us-west-1.amazonaws.com/dev/parse-inbound-email`
 - **Logs:** `aws logs tail /aws/lambda/events-parser-dev-parseInboundEmail --region us-west-1 --since 1h --format short`
 - **Inbound email:** inbound.new — email at `events.proteus.tools`, webhook posts JSON with attachment download URLs
@@ -125,7 +152,41 @@ Debugging playbook, in order:
    ```
    Caution: results are misleadingly stateful — a file can appear public because a prior authenticated fetch warmed it. Verify from a clean client before concluding shareability.
 
-Gotcha log (hard-won): `${env:VAR, "default"}` fallbacks in `serverless.ts` break when the default contains a comma (Serverless splits on it) — keep defaults in code, not serverless config. `tsx -e` cannot use top-level await (CJS transform); wrap in `async function main()`.
+## Troubleshooting: "a Drive upload didn't make it to the sheet"
+
+Debugging playbook, in order:
+
+1. **Survey outcomes** — every poll logs exactly one outcome line; anything else means a crash/timeout:
+   ```bash
+   aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1d --format short \
+     | grep -E "poll complete|nothing to do|Error polling|Task timed out"
+   ```
+   Shape: `Drive inbox poll complete: X processed, Y retrying, Z failed permanently`.
+
+2. **Inspect the ledger** (the source of truth — Drive folder state is only best-effort UX):
+   ```bash
+   aws s3 cp s3://$S3_BUCKET/drive-inbox/state.json - --region us-west-1
+   ```
+   Per file: `attempts` (pre-bumped, capped at 3), `status` (`processed`/`failed`/absent = in-flight), `alertPending`, `lastError`. No entry for a file that's in the folder = not yet seen OR pruned after leaving the inbox.
+
+3. **Map symptom → cause:**
+   - *File stuck in inbox, no ledger entry, no log line*: poller not running — check the heartbeat alarm and `aws events list-rules --region us-west-1 | grep -i drive`.
+   - *File stuck in inbox but ledger says `processed`*: the row IS in the sheet; only the best-effort move failed (expected for Liz-owned files sometimes — non-owner moves can 403). Cosmetic.
+   - *`attempts` climbing with `lastError: "No usable thumbnail…"`*: Drive hasn't generated a thumbnail (lags upload — normally resolves in 1-2 polls) or never will (junk/unsupported file → alert after 3 attempts).
+   - *Row appended but date column empty*: the image had no resolvable date. The prompt is anchored with today's Pacific date so "TODAY 8PM" screenshots resolve — if dates are systematically empty, check `buildPrompt` is receiving the date.
+   - *File in `processed/` but no row*: GPT extracted 0 events — this is treated as SUCCESS (no alert, by design; plenty of images legitimately contain no events). Check the archived image in S3 (`images/<ts>_drive_<fileId>_<name>`) to judge whether extraction should have found something.
+   - *`Error polling Drive inbox` every tick*: dependency down. `403 Drive API has not been used` = API disabled on the GCP project; `Ledger GET AccessDenied` = role lost `s3:ListBucket` (see hardening invariants); Sheets errors surface here too when a sourceTag group is present (fail-hard by design).
+
+4. **Alerting expectations:** Liz-actionable failures (3 attempts exhausted, folders dragged in) email her + Faizan once, at-least-once semantics via `alertPending`. Unexpected errors email Faizan only, throttled to 1/6h (S3 marker `drive-inbox/last-ops-alert.json`). CloudWatch alarms (SNS `decentered-ops-alarms`) fire independently of inbound.new: crashes, sustained poll failures, heartbeat.
+   **Testing caution:** alert recipients are LIVE (Liz gets failure alerts). For any test that exercises failure paths, override `ALERT_EMAIL_TO`/`ALERT_OPS_EMAIL_TO` on the function first and VERIFY restoration after — CloudFormation does not reliably revert manual env drift.
+
+5. **Empirical Drive API facts (verified July 2026, consumer Google account + service account):**
+   - The SA can LIST, DOWNLOAD, and MOVE files owned by others in a folder shared as Editor, but CANNOT TRASH them, and cannot upload/own files (zero storage quota post-Apr 2025). It CAN create folders (they consume no storage).
+   - GetObject on a missing S3 key returns 403 AccessDenied (not 404 NoSuchKey) unless the caller has `s3:ListBucket` — this is why the role has it.
+   - `thumbnailLink` needs `Authorization: Bearer` for non-public files, is short-lived (hours, never cache), lags upload for fresh files, and comes in `=sNNN` AND `=wNNN-hNNN-p-k-nu` suffix forms. Drive renders thumbnails for images, HEIC, and PDF page 1.
+   - `google-auth-library`'s `getAccessToken()` and gaxios calls have NO default timeout; the `inboundemail` client has none either. Every outbound call must be explicitly bounded (`{ timeout }` gaxios option, `AbortSignal.timeout`, or `withTimeout`).
+
+Gotcha log (hard-won): `${env:VAR, "default"}` fallbacks in `serverless.ts` break when the default contains a comma (Serverless splits on it) — keep defaults in code, not serverless config. `tsx -e` cannot use top-level await (CJS transform); wrap in `async function main()`. Lambda runs in UTC: date-only strings parse as UTC midnight, so local-run testing shows off-by-one dates that do NOT reproduce in prod.
 
 ## Code Style
 - Single quotes, no semicolons, no trailing commas
