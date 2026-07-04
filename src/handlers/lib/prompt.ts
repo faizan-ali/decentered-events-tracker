@@ -1,4 +1,10 @@
-export const PROMPT = `Extract ALL events from this image. The image may be a flyer, poster, social media post, screenshot, or any format containing event information.
+// today: YYYY-MM-DD in the event's local timezone (US Pacific). Screenshots of
+// event sites routinely say "TODAY 8PM" or "this Friday" — without an anchor
+// date the model must return null and the row lands date-less (unsortable and
+// invisible to dedupe).
+export const buildPrompt = (today: string) => `Today's date is ${today} (US Pacific).
+
+Extract ALL events from this image. The image may be a flyer, poster, social media post, screenshot, or any format containing event information.
 
 CRITICAL: If the image lists multiple events (e.g. a workshop series, a lineup, a calendar), extract EVERY event as a separate entry. Do not summarize or collapse them.
 
@@ -17,6 +23,7 @@ For each event, return these fields:
 
 Rules:
 - Never infer or guess dates. If not explicitly stated, use null
+- Relative dates ARE explicitly stated: resolve "today", "tonight", "tomorrow", weekday names ("this Friday"), and recurrence phrases ("every first Friday") to absolute dates using today's date above. Assume the image is from today unless it shows its own date
 - Hybrid events: combine locations with " & "
 - Multi-venue events: separate with " | "
 - All-day events: null for startTime and endTime
