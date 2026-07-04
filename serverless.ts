@@ -98,6 +98,109 @@ const serverlessConfiguration: AWS = {
     }
   },
 
+  // Watcher-independent alerting: the in-code alerts (sendFailureAlert /
+  // sendOpsAlert) ride on inbound.new, so they go silent exactly when
+  // inbound.new is the thing that's down — and nothing in-code can detect the
+  // scheduler itself dying. These alarms email via SNS with no dependency on
+  // the application's own plumbing.
+  resources: {
+    Resources: {
+      OpsAlarmTopic: {
+        Type: 'AWS::SNS::Topic',
+        Properties: {
+          TopicName: 'decentered-ops-alarms',
+          // Subscription requires a one-time email confirmation click
+          Subscription: [{ Protocol: 'email', Endpoint: 'faizanali619@gmail.com' }]
+        }
+      },
+      // Unhandled crashes (timeouts, OOM) — the handlers catch everything
+      // else, so the AWS/Lambda Errors metric fires only for these
+      DriveInboxCrashAlarm: {
+        Type: 'AWS::CloudWatch::Alarm',
+        Properties: {
+          AlarmName: 'decentered-drive-inbox-crashes',
+          AlarmDescription: 'pollDriveInbox crashed (timeout/OOM) 2+ times in 15 min. Debug: aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h',
+          Namespace: 'AWS/Lambda',
+          MetricName: 'Errors',
+          Dimensions: [{ Name: 'FunctionName', Value: 'events-parser-dev-pollDriveInbox' }],
+          Statistic: 'Sum',
+          Period: 900,
+          EvaluationPeriods: 1,
+          Threshold: 2,
+          ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+          TreatMissingData: 'notBreaching',
+          AlarmActions: [{ Ref: 'OpsAlarmTopic' }]
+        }
+      },
+      WebhookCrashAlarm: {
+        Type: 'AWS::CloudWatch::Alarm',
+        Properties: {
+          AlarmName: 'decentered-webhook-crashes',
+          AlarmDescription: 'parseInboundEmail crashed (timeout/OOM) 2+ times in 15 min. Debug: aws logs tail /aws/lambda/events-parser-dev-parseInboundEmail --region us-west-1 --since 1h',
+          Namespace: 'AWS/Lambda',
+          MetricName: 'Errors',
+          Dimensions: [{ Name: 'FunctionName', Value: 'events-parser-dev-parseInboundEmail' }],
+          Statistic: 'Sum',
+          Period: 900,
+          EvaluationPeriods: 1,
+          Threshold: 2,
+          ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+          TreatMissingData: 'notBreaching',
+          AlarmActions: [{ Ref: 'OpsAlarmTopic' }]
+        }
+      },
+      // The poller's top-level catch swallows errors by design (it must ack
+      // and retry next tick), so caught failures never hit the Errors metric.
+      // Surface sustained ones via a log metric filter instead — this fires
+      // even when inbound.new (the in-code alert channel) is what's broken.
+      DriveInboxCaughtErrorFilter: {
+        Type: 'AWS::Logs::MetricFilter',
+        DependsOn: 'PollDriveInboxLogGroup',
+        Properties: {
+          LogGroupName: '/aws/lambda/events-parser-dev-pollDriveInbox',
+          FilterPattern: '"Error polling Drive inbox"',
+          MetricTransformations: [{ MetricName: 'DriveInboxCaughtErrors', MetricNamespace: 'Decentered', MetricValue: '1', DefaultValue: 0, Unit: 'Count' }]
+        }
+      },
+      DriveInboxCaughtErrorAlarm: {
+        Type: 'AWS::CloudWatch::Alarm',
+        Properties: {
+          AlarmName: 'decentered-drive-inbox-poll-failures',
+          AlarmDescription: 'pollDriveInbox hit its top-level catch 3+ times in 30 min (every poll failing — Drive API, S3 ledger, or Sheets down). Debug: aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h',
+          Namespace: 'Decentered',
+          MetricName: 'DriveInboxCaughtErrors',
+          Statistic: 'Sum',
+          Period: 1800,
+          EvaluationPeriods: 1,
+          Threshold: 3,
+          ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+          TreatMissingData: 'notBreaching',
+          AlarmActions: [{ Ref: 'OpsAlarmTopic' }]
+        }
+      },
+      // Watches the watcher: the schedule should tick 12x/hour. Missing data
+      // = zero invocations = the scheduler itself is dead, which no in-code
+      // alert can ever report.
+      DriveInboxHeartbeatAlarm: {
+        Type: 'AWS::CloudWatch::Alarm',
+        Properties: {
+          AlarmName: 'decentered-drive-inbox-heartbeat',
+          AlarmDescription: 'pollDriveInbox ran fewer than 6 times in the last hour (expected 12). The EventBridge schedule is disabled, throttled, or the function is gone.',
+          Namespace: 'AWS/Lambda',
+          MetricName: 'Invocations',
+          Dimensions: [{ Name: 'FunctionName', Value: 'events-parser-dev-pollDriveInbox' }],
+          Statistic: 'Sum',
+          Period: 3600,
+          EvaluationPeriods: 1,
+          Threshold: 6,
+          ComparisonOperator: 'LessThanThreshold',
+          TreatMissingData: 'breaching',
+          AlarmActions: [{ Ref: 'OpsAlarmTopic' }]
+        }
+      }
+    }
+  },
+
   package: {
     individually: true
   }
