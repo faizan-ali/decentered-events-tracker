@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockS3Send, mockList, mockGet, mockUpdate, mockGetAccessToken, mockSendOpsAlert } = vi.hoisted(() => ({
+const { mockS3Send, mockList, mockGet, mockUpdate, mockGetAccessToken, mockDownAlert, mockRecoveredAlert } = vi.hoisted(() => ({
   mockS3Send: vi.fn(),
   mockList: vi.fn(),
   mockGet: vi.fn(),
   mockUpdate: vi.fn(),
   mockGetAccessToken: vi.fn().mockResolvedValue({ token: 'test-token' }),
-  mockSendOpsAlert: vi.fn().mockResolvedValue(undefined)
+  mockDownAlert: vi.fn().mockResolvedValue(undefined),
+  mockRecoveredAlert: vi.fn().mockResolvedValue(undefined)
 }))
 
 vi.mock('@aws-sdk/client-s3', () => ({
@@ -32,7 +33,8 @@ vi.mock('google-auth-library', () => ({
 }))
 
 vi.mock('./alert', () => ({
-  sendOpsAlert: mockSendOpsAlert
+  sendDrivePollerDownAlert: mockDownAlert,
+  sendDrivePollerRecoveredAlert: mockRecoveredAlert
 }))
 
 const mockFetch = vi.fn()
@@ -274,34 +276,102 @@ describe('drive-inbox lib', () => {
     })
   })
 
-  describe('sendThrottledOpsAlert', () => {
-    it('suppresses when a recent marker exists', async () => {
-      const { sendThrottledOpsAlert } = await getLib()
-      mockS3Send.mockResolvedValue({ Body: { transformToString: async () => JSON.stringify({ sentAt: new Date().toISOString() }) } })
+  describe('reportPollFailure / recordPollSuccess (streak-based ops alerting)', () => {
+    const stateBody = (state: object) => ({ Body: { transformToString: async () => JSON.stringify(state) } })
+    const noSuchKey = () => {
+      const err = new Error('missing')
+      err.name = 'NoSuchKey'
+      return err
+    }
 
-      await sendThrottledOpsAlert(new Error('boom'), 'test')
+    it('does NOT alert on the first failure — the next poll is the retry', async () => {
+      const { reportPollFailure } = await getLib()
+      mockS3Send.mockImplementation(async (cmd: any) => {
+        if (cmd.__type === 'Get') throw noSuchKey()
+        return {}
+      })
 
-      expect(mockSendOpsAlert).not.toHaveBeenCalled()
+      await reportPollFailure(new Error('blip'), [{ name: 'a.png', attempts: 1 }])
+
+      expect(mockDownAlert).not.toHaveBeenCalled()
+      // streak persisted for the next run
+      const put = mockS3Send.mock.calls.find(c => c[0].__type === 'Put')
+      expect(JSON.parse(put?.[0].Body)).toMatchObject({ consecutiveFailures: 1, alertedThisStreak: false })
     })
 
-    it('sends and writes the marker when the last alert is stale', async () => {
-      const { sendThrottledOpsAlert } = await getLib()
-      const stale = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString()
-      mockS3Send.mockResolvedValueOnce({ Body: { transformToString: async () => JSON.stringify({ sentAt: stale }) } }).mockResolvedValueOnce({})
+    it('alerts once the streak reaches 3 consecutive failures, with in-flight context', async () => {
+      const { reportPollFailure } = await getLib()
+      mockS3Send.mockImplementation(async (cmd: any) => {
+        if (cmd.__type === 'Get') return stateBody({ consecutiveFailures: 2, firstFailureAt: '2026-07-04T10:00:00Z', alertedThisStreak: false })
+        return {}
+      })
 
-      await sendThrottledOpsAlert(new Error('boom'), 'test')
+      await reportPollFailure(new Error('still down'), [{ name: 'a.png', attempts: 2 }])
 
-      expect(mockSendOpsAlert).toHaveBeenCalledWith(expect.any(Error), 'test')
-      expect(mockS3Send.mock.calls[1][0]).toMatchObject({ __type: 'Put', Key: 'drive-inbox/last-ops-alert.json' })
+      expect(mockDownAlert).toHaveBeenCalledWith(expect.any(Error), 3, '2026-07-04T10:00:00Z', [{ name: 'a.png', attempts: 2 }])
+      const put = mockS3Send.mock.calls.find(c => c[0].__type === 'Put')
+      expect(JSON.parse(put?.[0].Body)).toMatchObject({ consecutiveFailures: 3, alertedThisStreak: true })
     })
 
-    it('fails open: alerts anyway when the marker check itself breaks', async () => {
-      const { sendThrottledOpsAlert } = await getLib()
+    it('rate-caps down-alerts to one per 6h while still failing', async () => {
+      const { reportPollFailure } = await getLib()
+      const recentAlert = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+      mockS3Send.mockImplementation(async (cmd: any) => {
+        if (cmd.__type === 'Get') return stateBody({ consecutiveFailures: 10, firstFailureAt: '2026-07-04T10:00:00Z', alertedThisStreak: true, lastAlertAt: recentAlert })
+        return {}
+      })
+
+      await reportPollFailure(new Error('still down'), [])
+
+      expect(mockDownAlert).not.toHaveBeenCalled()
+    })
+
+    it('fails open with an immediate alert when the streak state itself is unreadable', async () => {
+      const { reportPollFailure } = await getLib()
       mockS3Send.mockRejectedValue(new Error('S3 down'))
 
-      await sendThrottledOpsAlert(new Error('boom'), 'test')
+      await reportPollFailure(new Error('boom'), [])
 
-      expect(mockSendOpsAlert).toHaveBeenCalled()
+      expect(mockDownAlert).toHaveBeenCalled()
+    })
+
+    it('sends a recovery email and resets the streak when a poll succeeds after an alerted outage', async () => {
+      const { recordPollSuccess } = await getLib()
+      mockS3Send.mockImplementation(async (cmd: any) => {
+        if (cmd.__type === 'Get') return stateBody({ consecutiveFailures: 5, firstFailureAt: '2026-07-04T10:00:00Z', alertedThisStreak: true })
+        return {}
+      })
+
+      await recordPollSuccess()
+
+      expect(mockRecoveredAlert).toHaveBeenCalledWith(5, '2026-07-04T10:00:00Z')
+      const put = mockS3Send.mock.calls.find(c => c[0].__type === 'Put')
+      expect(JSON.parse(put?.[0].Body)).toMatchObject({ consecutiveFailures: 0 })
+    })
+
+    it('stays silent on recovery from a short, never-alerted streak', async () => {
+      const { recordPollSuccess } = await getLib()
+      mockS3Send.mockImplementation(async (cmd: any) => {
+        if (cmd.__type === 'Get') return stateBody({ consecutiveFailures: 1, firstFailureAt: '2026-07-04T10:00:00Z', alertedThisStreak: false })
+        return {}
+      })
+
+      await recordPollSuccess()
+
+      expect(mockRecoveredAlert).not.toHaveBeenCalled()
+    })
+
+    it('does nothing on success when there is no streak (the every-5-min hot path)', async () => {
+      const { recordPollSuccess } = await getLib()
+      mockS3Send.mockImplementation(async (cmd: any) => {
+        if (cmd.__type === 'Get') throw noSuchKey()
+        return {}
+      })
+
+      await recordPollSuccess()
+
+      expect(mockRecoveredAlert).not.toHaveBeenCalled()
+      expect(mockS3Send.mock.calls.filter(c => c[0].__type === 'Put')).toHaveLength(0)
     })
   })
 })

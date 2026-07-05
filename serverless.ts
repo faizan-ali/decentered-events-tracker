@@ -119,7 +119,8 @@ const serverlessConfiguration: AWS = {
         Type: 'AWS::CloudWatch::Alarm',
         Properties: {
           AlarmName: 'decentered-drive-inbox-crashes',
-          AlarmDescription: 'pollDriveInbox crashed (timeout/OOM) 2+ times in 15 min. Debug: aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h',
+          AlarmDescription:
+            'pollDriveInbox crashed (timeout/OOM) 2+ times in 15 min. Debug: aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h',
           Namespace: 'AWS/Lambda',
           MetricName: 'Errors',
           Dimensions: [{ Name: 'FunctionName', Value: 'events-parser-dev-pollDriveInbox' }],
@@ -136,7 +137,8 @@ const serverlessConfiguration: AWS = {
         Type: 'AWS::CloudWatch::Alarm',
         Properties: {
           AlarmName: 'decentered-webhook-crashes',
-          AlarmDescription: 'parseInboundEmail crashed (timeout/OOM) 2+ times in 15 min. Debug: aws logs tail /aws/lambda/events-parser-dev-parseInboundEmail --region us-west-1 --since 1h',
+          AlarmDescription:
+            'parseInboundEmail crashed (timeout/OOM) 2+ times in 15 min. Debug: aws logs tail /aws/lambda/events-parser-dev-parseInboundEmail --region us-west-1 --since 1h',
           Namespace: 'AWS/Lambda',
           MetricName: 'Errors',
           Dimensions: [{ Name: 'FunctionName', Value: 'events-parser-dev-parseInboundEmail' }],
@@ -166,7 +168,8 @@ const serverlessConfiguration: AWS = {
         Type: 'AWS::CloudWatch::Alarm',
         Properties: {
           AlarmName: 'decentered-drive-inbox-poll-failures',
-          AlarmDescription: 'pollDriveInbox hit its top-level catch 3+ times in 30 min (every poll failing — Drive API, S3 ledger, or Sheets down). Debug: aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h',
+          AlarmDescription:
+            'pollDriveInbox hit its top-level catch 3+ times in 30 min (every poll failing — Drive API, S3 ledger, or Sheets down). Debug: aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h',
           Namespace: 'Decentered',
           MetricName: 'DriveInboxCaughtErrors',
           Statistic: 'Sum',

@@ -7,7 +7,8 @@ const {
   mockListInboxFiles,
   mockDownloadInboxImage,
   mockMoveToProcessed,
-  mockThrottledOpsAlert,
+  mockReportPollFailure,
+  mockRecordPollSuccess,
   mockExtractEvents,
   mockUploadToS3,
   mockAddEvents,
@@ -19,7 +20,8 @@ const {
   mockListInboxFiles: vi.fn(),
   mockDownloadInboxImage: vi.fn(),
   mockMoveToProcessed: vi.fn(),
-  mockThrottledOpsAlert: vi.fn().mockResolvedValue(undefined),
+  mockReportPollFailure: vi.fn().mockResolvedValue(undefined),
+  mockRecordPollSuccess: vi.fn().mockResolvedValue(undefined),
   mockExtractEvents: vi.fn(),
   mockUploadToS3: vi.fn(),
   mockAddEvents: vi.fn(),
@@ -34,7 +36,8 @@ vi.mock('./lib/drive-inbox', () => ({
   listInboxFiles: mockListInboxFiles,
   downloadInboxImage: mockDownloadInboxImage,
   moveToProcessed: mockMoveToProcessed,
-  sendThrottledOpsAlert: mockThrottledOpsAlert
+  reportPollFailure: mockReportPollFailure,
+  recordPollSuccess: mockRecordPollSuccess
 }))
 
 vi.mock('./lib/openai', () => ({ extractEvents: mockExtractEvents }))
@@ -136,7 +139,7 @@ describe('pollDriveInbox', () => {
 
     expect(mockDownloadInboxImage).not.toHaveBeenCalled()
     expect(mockExtractEvents).not.toHaveBeenCalled()
-    expect(mockThrottledOpsAlert).toHaveBeenCalled()
+    expect(mockReportPollFailure).toHaveBeenCalled()
   })
 
   it('leaves a transiently-failed file for the next poll: attempts persisted, no status, no alert', async () => {
@@ -215,7 +218,7 @@ describe('pollDriveInbox', () => {
     expect(ledgerSaves.at(-1)?.f1?.status).toBeUndefined()
     expect(ledgerSaves.at(-1)?.f1).toMatchObject({ attempts: 1 })
     expect(mockMoveToProcessed).not.toHaveBeenCalled()
-    expect(mockThrottledOpsAlert).toHaveBeenCalled()
+    expect(mockReportPollFailure).toHaveBeenCalled()
   })
 
   it('prunes ledger entries for files that left the inbox', async () => {
@@ -272,7 +275,8 @@ describe('pollDriveInbox', () => {
     await run()
 
     expect(ledgerSaves.at(-1)?.f1).toMatchObject({ status: 'processed' })
-    expect(mockThrottledOpsAlert).not.toHaveBeenCalled()
+    expect(mockReportPollFailure).not.toHaveBeenCalled()
+    expect(mockRecordPollSuccess).toHaveBeenCalled()
   })
 
   it('fails the file (transient) when the S3 upload fails, instead of appending rows with an empty link', async () => {
@@ -322,11 +326,12 @@ describe('pollDriveInbox', () => {
     expect(mockDriveFailureAlert).toHaveBeenCalledWith([expect.objectContaining({ link: 'https://drive.google.com/drive/folders/sub1' })])
   })
 
-  it('sends a throttled ops alert on unexpected top-level errors', async () => {
+  it('reports the failure (streak-tracked, not immediately emailed) on unexpected top-level errors', async () => {
     mockListInboxFiles.mockRejectedValue(new Error('Drive API disabled'))
 
     await run()
 
-    expect(mockThrottledOpsAlert).toHaveBeenCalledWith(expect.any(Error), expect.stringContaining('pollDriveInbox'))
+    expect(mockReportPollFailure).toHaveBeenCalledWith(expect.any(Error), [])
+    expect(mockRecordPollSuccess).not.toHaveBeenCalled()
   })
 })

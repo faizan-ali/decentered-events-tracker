@@ -1,5 +1,6 @@
 import { JWT } from 'google-auth-library'
 import { google } from 'googleapis'
+import { type CachedDedupeEntry, loadDedupeCache, saveDedupeCache } from './dedupe-cache'
 
 export interface Event {
   title: string
@@ -195,21 +196,19 @@ export function isFuzzyMatch(a: string, b: string, threshold = 0.75): boolean {
   return similarity(a, b) >= threshold
 }
 
-interface ExistingEvent {
-  date: string
-  title: string
-  address: string
-  link: string
-}
+type ExistingEvent = CachedDedupeEntry
 
-// Fetch existing events from the spreadsheet for dedupe. failHard controls
-// what a read failure means: the email path prefers availability (append
-// without dedupe rather than bounce the webhook), but callers relying on the
-// exact sourceTag replay guarantee must abort instead — an empty read-back
-// silently voids that guarantee and duplicates rows.
+// Fetch existing events from the spreadsheet for dedupe. The sheet is the
+// source of truth and is read fresh on every append (manual sheet edits are
+// respected); the S3 cache is a FALLBACK for when that read fails (Sheets
+// tail latency). Failure ladder:
+//   1. read the sheet (bounded 15s) — on success, refresh the fallback cache
+//   2. read failed → use the cache (at most minutes stale, hard 24h cap)
+//   3. no usable cache → failHard callers (sourceTag groups, whose exact
+//      replay guarantee an empty read-back would void) abort; the email path
+//      proceeds without dedupe for availability
 async function getExistingEvents(sheets: any, spreadsheetId: string, failHard: boolean): Promise<ExistingEvent[]> {
-  const events: ExistingEvent[] = []
-
+  let readError: unknown
   try {
     const result = await sheets.spreadsheets.values.get(
       {
@@ -221,6 +220,7 @@ async function getExistingEvents(sheets: any, spreadsheetId: string, failHard: b
       { timeout: 15_000 }
     )
 
+    const events: ExistingEvent[] = []
     const rows = result.data.values || []
     for (const row of rows) {
       const date = (row[0] || '').toLowerCase().trim()
@@ -233,12 +233,22 @@ async function getExistingEvents(sheets: any, spreadsheetId: string, failHard: b
         events.push({ date, title, address, link })
       }
     }
+
+    await saveDedupeCache(events).catch(cacheError => console.warn('Failed to refresh dedupe cache (non-fatal):', cacheError))
+    return events
   } catch (error) {
-    if (failHard) throw error
-    console.error('Error fetching existing events for dedupe, proceeding without dedupe:', error)
+    readError = error
   }
 
-  return events
+  const cached = await loadDedupeCache()
+  if (cached) {
+    console.warn(`Sheet dedupe read failed, falling back to cached index (${cached.length} entries):`, readError)
+    return cached
+  }
+
+  if (failHard) throw readError
+  console.error('Error fetching existing events for dedupe and no usable cache, proceeding without dedupe:', readError)
+  return []
 }
 
 // Add events to Google Spreadsheet. A group's optional sourceTag is a
@@ -275,6 +285,9 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
     eventGroups.some(group => group.sourceTag)
   )
   console.log(`Found ${existingEvents.length} existing events in spreadsheet`)
+  // Pristine copy for the post-append cache update (existingEvents is
+  // mutated by the in-batch dedupe below)
+  const fetchedExisting = [...existingEvents]
 
   // Flatten all events from all groups, skipping groups whose source file
   // already produced rows
@@ -354,6 +367,18 @@ export async function addEventsToSpreadsheet(eventGroups: Array<{ events: Event[
     )
 
     console.log(`Successfully added ${rows.length} events to spreadsheet. Updated range: ${result.data.updates?.updatedRange}`)
+
+    // Merge the appended rows into the fallback cache IMMEDIATELY: if this
+    // run crashes before its caller records success and the replay's sheet
+    // read then also fails, the cache is what still carries these rows'
+    // sourceTags and blocks duplicate appends
+    const appendedEntries = newEvents.map(event => ({
+      date: event.date.toLowerCase().trim(),
+      title: normalizeText(event.eventName),
+      address: normalizeAddress(event.address),
+      link: event.link
+    }))
+    await saveDedupeCache([...fetchedExisting, ...appendedEntries]).catch(cacheError => console.warn('Failed to update dedupe cache after append (non-fatal):', cacheError))
   } catch (error) {
     console.error('Error adding events to spreadsheet:', error)
     throw error

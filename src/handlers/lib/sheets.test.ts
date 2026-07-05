@@ -44,6 +44,18 @@ vi.mock('google-auth-library', () => ({
   JWT: vi.fn().mockImplementation(() => ({}))
 }))
 
+// Mock the S3-backed dedupe cache — default: cache miss
+const { mockLoadCache, mockSaveCache } = vi.hoisted(() => ({
+  mockLoadCache: vi.fn(),
+  mockSaveCache: vi.fn()
+}))
+mockLoadCache.mockResolvedValue(null)
+mockSaveCache.mockResolvedValue(undefined)
+vi.mock('./dedupe-cache', () => ({
+  loadDedupeCache: mockLoadCache,
+  saveDedupeCache: mockSaveCache
+}))
+
 describe('formatDate', () => {
   describe('valid date strings', () => {
     it('should format date string to MM/DD/YYYY', () => {
@@ -511,11 +523,34 @@ describe('addEventsToSpreadsheet', () => {
     expect(mockGet).toHaveBeenCalledWith(expect.objectContaining({ range: 'A:J' }), expect.objectContaining({ timeout: expect.any(Number) }))
   })
 
-  it('should throw when the dedupe read fails and a group carries a sourceTag (exact replay guarantee must not silently degrade)', async () => {
+  it('should throw when the dedupe read fails, no cache exists, and a group carries a sourceTag (exact replay guarantee must not silently degrade)', async () => {
     mockGet.mockRejectedValueOnce(new Error('Sheets read timeout'))
+    mockLoadCache.mockResolvedValueOnce(null)
 
     await expect(addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/image.png', sourceTag: 'drive_abc123_' }])).rejects.toThrow('Sheets read timeout')
     expect(mockAppend).not.toHaveBeenCalled()
+  })
+
+  it('should fall back to the cached index when the sheet read fails — sourceTag dedupe still works', async () => {
+    mockGet.mockRejectedValueOnce(new Error('Sheets read timeout'))
+    mockLoadCache.mockResolvedValueOnce([{ date: '', title: 'undated show', address: '', link: 'https://bucket.s3.amazonaws.com/images/1_drive_abc123_flyer.png' }])
+
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/new.png', sourceTag: 'drive_abc123_' }])
+
+    // the cached link carried the sourceTag → whole group skipped, no throw
+    expect(mockAppend).not.toHaveBeenCalled()
+  })
+
+  it('should refresh the cache after a successful sheet read and merge appended rows into it', async () => {
+    mockGet.mockResolvedValueOnce({ data: { values: [['03/10/2025', 'Old Event', '', '', '', '', '9 Elm St', '', '$5', 'https://x/old.png']] } })
+
+    await addEventsToSpreadsheet([{ events: [sampleEvent], s3Url: 'https://example.com/new.png', sourceTag: 'drive_new1_' }])
+
+    // first save: the fetched index; second save: fetched + appended rows
+    expect(mockSaveCache).toHaveBeenCalledTimes(2)
+    const finalCache = mockSaveCache.mock.calls[1][0]
+    expect(finalCache).toHaveLength(2)
+    expect(finalCache[1]).toMatchObject({ title: 'test event', link: 'https://example.com/new.png' })
   })
 
   it('should proceed without dedupe on read failure when no group carries a sourceTag (email-path availability)', async () => {

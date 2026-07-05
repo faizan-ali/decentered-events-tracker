@@ -139,9 +139,17 @@ const KNOWN_ISSUES: Array<{ pattern: RegExp; note: string }> = [
   },
   {
     pattern: /timeout|aborted|ETIMEDOUT|ECONNRESET|429|rate limit/i,
-    note: 'Looks transient (network/rate limit). The 500 response makes inbound.new redeliver — if this alert does not repeat, the retry succeeded and no action is needed.'
+    note: 'Looks transient (network/rate limit). Retries happen automatically — webhook path: inbound.new redelivers on the 500; Drive path: the next 5-minute poll retries. Only repeated alerts need action.'
   }
 ]
+
+export function classifyError(error: unknown): string {
+  // Classify on the message only — stack traces contain arbitrary paths and
+  // line numbers that false-positive against patterns like /429/
+  const message = error instanceof Error ? error.message : String(error)
+  const matched = KNOWN_ISSUES.filter(issue => issue.pattern.test(message))
+  return matched.length ? matched.map(issue => `Possible known issue: ${issue.note}`).join('\n\n') : UNKNOWN_CHECKLIST
+}
 
 const UNKNOWN_CHECKLIST = [
   'No known failure mode matched. Quick checklist:',
@@ -157,11 +165,7 @@ const UNKNOWN_CHECKLIST = [
 // catch block's console.error was the only trace).
 export async function sendOpsAlert(error: unknown, context: string): Promise<void> {
   const detail = error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error)
-  // Classify on the message only — stack traces contain arbitrary paths and
-  // line numbers that false-positive against patterns like /429/
-  const message = error instanceof Error ? error.message : String(error)
-  const matched = KNOWN_ISSUES.filter(issue => issue.pattern.test(message))
-  const diagnosis = matched.length ? matched.map(issue => `Possible known issue: ${issue.note}`).join('\n\n') : UNKNOWN_CHECKLIST
+  const diagnosis = classifyError(error)
 
   // Bounded for the same reason as the Drive-inbox alert: the scheduled path
   // has no external ceiling, and this is called from catch blocks where a
@@ -185,5 +189,73 @@ export async function sendOpsAlert(error: unknown, context: string): Promise<voi
     }),
     15_000,
     'Ops alert send'
+  )
+}
+
+export interface InFlightFile {
+  name: string
+  attempts: number
+}
+
+// Sent only after the Drive poller has failed several CONSECUTIVE polls — a
+// single failed poll is not an incident (the next tick retries it) and is
+// deliberately not emailed. Pair: sendDrivePollerRecoveredAlert closes the
+// loop when polls succeed again.
+export async function sendDrivePollerDownAlert(error: unknown, consecutiveFailures: number, firstFailureAt: string, inFlight: InFlightFile[]): Promise<void> {
+  const detail = error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error)
+  const downMinutes = Math.round((Date.now() - Date.parse(firstFailureAt)) / 60000)
+  const inFlightList = inFlight.length
+    ? inFlight.map(f => `  - ${f.name} (attempt ${f.attempts} of 3)`).join('\n')
+    : '  (none were mid-processing — the failure is in listing/setup, not a specific file)'
+
+  await withTimeout(
+    client.emails.send({
+      from: ALERT_FROM,
+      to: OPS_ALERT_TO,
+      subject: `[decentered] Drive poller DOWN — ${consecutiveFailures} consecutive failed polls (~${downMinutes} min)`,
+      text: [
+        `The Drive inbox poller has failed ${consecutiveFailures} polls in a row since ${firstFailureAt} (~${downMinutes} minutes).`,
+        'Single failures are retried silently; this many in a row means a dependency is genuinely down.',
+        '',
+        classifyError(error),
+        '',
+        `Files in flight on the latest attempt:`,
+        inFlightList,
+        '',
+        'What happens automatically: every 5 minutes the poller retries. Files alert Liz after 3 failed processing attempts',
+        '— but attempts consumed by infrastructure failures like this may burn those, so after recovery, check whether any',
+        'files were marked failed and clear their ledger entries to reprocess.',
+        'A recovery email will follow when polls succeed again. If this repeats every 6h, nobody has fixed it.',
+        '',
+        '--- Latest error ---',
+        detail,
+        '',
+        'Debug: aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 3h --format short',
+        'Ledger: aws s3 cp s3://$S3_BUCKET/drive-inbox/state.json - --region us-west-1'
+      ].join('\n')
+    }),
+    15_000,
+    'Drive poller down alert send'
+  )
+}
+
+export async function sendDrivePollerRecoveredAlert(consecutiveFailures: number, firstFailureAt: string): Promise<void> {
+  const downMinutes = Math.round((Date.now() - Date.parse(firstFailureAt)) / 60000)
+  await withTimeout(
+    client.emails.send({
+      from: ALERT_FROM,
+      to: OPS_ALERT_TO,
+      subject: `[decentered] Drive poller recovered after ${consecutiveFailures} failed polls (~${downMinutes} min)`,
+      text: [
+        `The Drive inbox poller is healthy again after ${consecutiveFailures} consecutive failures starting ${firstFailureAt}.`,
+        '',
+        'Follow-up: check the ledger for files whose attempts were exhausted during the outage (status "failed") —',
+        'those alerted Liz to re-upload, but if the files were fine and only the infrastructure was down, deleting',
+        'their ledger entries reprocesses them without her doing anything.',
+        'Ledger: aws s3 cp s3://$S3_BUCKET/drive-inbox/state.json - --region us-west-1'
+      ].join('\n')
+    }),
+    15_000,
+    'Drive poller recovery alert send'
   )
 }

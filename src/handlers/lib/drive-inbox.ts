@@ -11,7 +11,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { JWT } from 'google-auth-library'
 import { type drive_v3, google } from 'googleapis'
-import { sendOpsAlert } from './alert'
+import { type InFlightFile, sendDrivePollerDownAlert, sendDrivePollerRecoveredAlert } from './alert'
 import { isImageBuffer } from './drive'
 import { withTimeout } from './timeout'
 
@@ -21,8 +21,7 @@ const INBOX_FOLDER_ID = process.env.DRIVE_INBOX_FOLDER_ID
 const PROCESSED_FOLDER_ID = process.env.DRIVE_PROCESSED_FOLDER_ID
 
 const LEDGER_KEY = 'drive-inbox/state.json'
-const OPS_MARKER_KEY = 'drive-inbox/last-ops-alert.json'
-const OPS_ALERT_SUPPRESSION_MS = 6 * 60 * 60 * 1000
+const OPS_STATE_KEY = 'drive-inbox/ops-state.json'
 
 // Raw download is only a fallback for when Drive has not generated a
 // thumbnail: OpenAI accepts these formats directly, and 15MB is a safe bound
@@ -228,32 +227,93 @@ export async function moveToProcessed(fileId: string): Promise<void> {
   await drive.files.update({ fileId, addParents: PROCESSED_FOLDER_ID, removeParents: INBOX_FOLDER_ID, fields: 'id' }, { timeout: DRIVE_CALL_TIMEOUT_MS })
 }
 
-// A broken dependency (folder unshared, API disabled) would otherwise fire
-// sendOpsAlert every 5 minutes — 288 emails/day. Suppress repeats via an S3
-// marker, failing OPEN: if the marker check itself breaks, alert anyway
-// rather than silencing the alert about the breakage.
-export async function sendThrottledOpsAlert(error: unknown, context: string): Promise<void> {
+// Ops alerting on PERSISTENCE, not occurrence: a single failed poll is not an
+// incident — the next 5-minute tick IS the retry, so emailing on the first
+// failure produces alarms for self-healing blips. Instead, track consecutive
+// failures in S3 and email only when a streak crosses the threshold, with a
+// recovery email closing the loop. Down-alerts are rate-capped at one per 6h
+// even across streaks (flap protection); the CloudWatch log-filter alarm is
+// the independent real-time backstop throughout.
+interface OpsState {
+  consecutiveFailures: number
+  firstFailureAt: string
+  alertedThisStreak: boolean
+  lastAlertAt?: string
+}
+
+const CONSECUTIVE_FAILURES_BEFORE_ALERT = 3
+const REALERT_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+async function loadOpsState(): Promise<OpsState | null> {
   try {
-    const result = await s3Client.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: OPS_MARKER_KEY }))
+    const result = await s3Client.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: OPS_STATE_KEY }))
     const body = await result.Body?.transformToString()
-    const lastSentAt = body ? Date.parse(JSON.parse(body).sentAt) : 0
-    if (Date.now() - lastSentAt < OPS_ALERT_SUPPRESSION_MS) {
-      console.log(`Ops alert suppressed (last sent ${new Date(lastSentAt).toISOString()}):`, error)
-      return
-    }
-  } catch (markerError) {
-    if (!(markerError instanceof Error && markerError.name === 'NoSuchKey')) {
-      console.error('Ops alert marker check failed, alerting anyway:', markerError)
-    }
+    return body ? (JSON.parse(body) as OpsState) : null
+  } catch (error) {
+    if (error instanceof Error && error.name === 'NoSuchKey') return null
+    throw error
+  }
+}
+
+async function saveOpsState(state: OpsState): Promise<void> {
+  await s3Client.send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: OPS_STATE_KEY, Body: JSON.stringify(state), ContentType: 'application/json' }))
+}
+
+export async function reportPollFailure(error: unknown, inFlight: InFlightFile[]): Promise<void> {
+  let state: OpsState = { consecutiveFailures: 0, firstFailureAt: new Date().toISOString(), alertedThisStreak: false }
+  let stateReadable = true
+  try {
+    state = (await loadOpsState()) ?? state
+  } catch (stateError) {
+    // Fail OPEN: if we cannot count failures we alert immediately rather
+    // than never — the breakage may be S3 itself
+    stateReadable = false
+    console.error('Ops state unreadable, failing open to an immediate alert:', stateError)
   }
 
-  await sendOpsAlert(error, context)
+  state.consecutiveFailures += 1
+  if (state.consecutiveFailures === 1) {
+    state.firstFailureAt = new Date().toISOString()
+    state.alertedThisStreak = false
+  }
 
+  const dueByStreak = state.consecutiveFailures >= CONSECUTIVE_FAILURES_BEFORE_ALERT
+  const dueByTime = !state.lastAlertAt || Date.now() - Date.parse(state.lastAlertAt) >= REALERT_INTERVAL_MS
+  if ((dueByStreak && dueByTime) || !stateReadable) {
+    try {
+      await sendDrivePollerDownAlert(error, state.consecutiveFailures, state.firstFailureAt, inFlight)
+      state.alertedThisStreak = true
+      state.lastAlertAt = new Date().toISOString()
+      console.log(`Sent poller-down alert (${state.consecutiveFailures} consecutive failures)`)
+    } catch (alertError) {
+      console.error('Failed to send poller-down alert:', alertError)
+    }
+  } else {
+    console.log(`Poll failure ${state.consecutiveFailures} of ${CONSECUTIVE_FAILURES_BEFORE_ALERT} before ops alert — next poll retries automatically`)
+  }
+
+  if (stateReadable) {
+    try {
+      await saveOpsState(state)
+    } catch (stateError) {
+      console.error('Failed to persist ops failure streak:', stateError)
+    }
+  }
+}
+
+// Called at the end of every successful poll (including idle ones). Cheap:
+// one small S3 GET; writes only when there was a streak to clear.
+export async function recordPollSuccess(): Promise<void> {
   try {
-    await s3Client.send(
-      new PutObjectCommand({ Bucket: S3_BUCKET, Key: OPS_MARKER_KEY, Body: JSON.stringify({ sentAt: new Date().toISOString(), context }), ContentType: 'application/json' })
-    )
-  } catch (markerError) {
-    console.error('Failed to write ops alert marker (next error will alert again):', markerError)
+    const state = await loadOpsState()
+    if (!state || state.consecutiveFailures === 0) return
+    if (state.alertedThisStreak) {
+      await sendDrivePollerRecoveredAlert(state.consecutiveFailures, state.firstFailureAt).catch(alertError => console.error('Failed to send recovery alert:', alertError))
+    } else {
+      console.log(`Poll recovered after ${state.consecutiveFailures} failure(s) — below alert threshold, no email was sent`)
+    }
+    await saveOpsState({ consecutiveFailures: 0, firstFailureAt: '', alertedThisStreak: false, lastAlertAt: state.lastAlertAt })
+  } catch (stateError) {
+    console.warn('Could not check/reset ops failure streak (non-fatal):', stateError)
   }
 }

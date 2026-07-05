@@ -18,8 +18,8 @@
 // non-owner moves).
 
 import type { ScheduledHandler } from 'aws-lambda'
-import { type DriveInboxFailure, sendDriveInboxFailureAlert } from './lib/alert'
-import { type InboxFile, type Ledger, downloadInboxImage, listInboxFiles, loadLedger, moveToProcessed, saveLedger, sendThrottledOpsAlert } from './lib/drive-inbox'
+import { type DriveInboxFailure, type InFlightFile, sendDriveInboxFailureAlert } from './lib/alert'
+import { type InboxFile, type Ledger, downloadInboxImage, listInboxFiles, loadLedger, moveToProcessed, recordPollSuccess, reportPollFailure, saveLedger } from './lib/drive-inbox'
 import { type Event, normalizeEvent } from './lib/events'
 import { extractEvents } from './lib/openai'
 import { uploadToS3 } from './lib/s3'
@@ -40,6 +40,9 @@ function touch(ledger: Ledger, file: InboxFile): void {
 }
 
 export const pollDriveInbox: ScheduledHandler = async () => {
+  // Populated once the queue is known so a failure alert can say which files
+  // were mid-processing
+  let inFlight: InFlightFile[] = []
   try {
     const ledger = await loadLedger()
     const listed = await listInboxFiles()
@@ -67,6 +70,7 @@ export const pollDriveInbox: ScheduledHandler = async () => {
 
     if (!queue.length && !folders.length && !exhausted.length && !pendingAlertEntries.length) {
       console.log(`Drive inbox poll: nothing to do (${listed.length} file(s) listed, all handled)`)
+      await recordPollSuccess()
       return
     }
 
@@ -79,6 +83,7 @@ export const pollDriveInbox: ScheduledHandler = async () => {
       touch(ledger, file)
       ledger[file.id].attempts += 1
     }
+    inFlight = queue.map(file => ({ name: file.name, attempts: ledger[file.id].attempts }))
     await saveLedger(ledger)
 
     const eventGroups: Array<{ events: Event[]; s3Url: string; sourceTag: string }> = []
@@ -194,14 +199,16 @@ export const pollDriveInbox: ScheduledHandler = async () => {
 
     const retrying = failedThisRun.filter(({ file }) => ledger[file.id]?.status !== 'failed').length
     console.log(`Drive inbox poll complete: ${succeeded.length} processed, ${retrying} retrying, ${permanentFailures.length} failed permanently`)
+    await recordPollSuccess()
   } catch (error) {
     console.error('Error polling Drive inbox:', error)
-    // Report, don't just contain — but throttled: this fires every 5 minutes
-    // when a dependency is down, and 288 emails/day helps nobody
+    // Report persistence, not occurrence: a single failed poll self-heals on
+    // the next tick and sends nothing; consecutive failures escalate to an
+    // ops email with the in-flight context (see reportPollFailure)
     try {
-      await sendThrottledOpsAlert(error, 'pollDriveInbox top-level catch')
+      await reportPollFailure(error, inFlight)
     } catch (alertError) {
-      console.error('Failed to send ops alert:', alertError)
+      console.error('Failed to report poll failure:', alertError)
     }
   }
 }
