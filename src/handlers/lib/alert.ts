@@ -219,7 +219,7 @@ export async function sendDrivePollerDownAlert(error: unknown, consecutiveFailur
         '',
         classifyError(error),
         '',
-        `Files in flight on the latest attempt:`,
+        'Files in flight on the latest attempt:',
         inFlightList,
         '',
         'What happens automatically: every 5 minutes the poller retries. Files alert Liz after 3 failed processing attempts',
