@@ -1,10 +1,14 @@
 import type { InboundWebhookEmail } from 'inboundemail'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockSend } = vi.hoisted(() => ({ mockSend: vi.fn() }))
+const { mockSend, mockArchive } = vi.hoisted(() => ({ mockSend: vi.fn(), mockArchive: vi.fn() }))
 vi.mock('inboundemail', () => ({
   Inbound: vi.fn().mockImplementation(() => ({ emails: { send: mockSend } }))
 }))
+vi.mock('./alert-archive', () => ({
+  archiveAlert: mockArchive
+}))
+mockArchive.mockResolvedValue(undefined)
 
 import { sendFailureAlert, sendOpsAlert } from './alert'
 
@@ -104,5 +108,27 @@ describe('sendOpsAlert', () => {
     const text = mockSend.mock.calls[0][0].text
     expect(text).toContain('No known failure mode matched')
     expect(text).toContain('CLAUDE.md')
+  })
+})
+
+describe('alert archiving', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSend.mockResolvedValue({})
+    mockArchive.mockResolvedValue(undefined)
+  })
+
+  it('archives the failure alert to S3 before sending the email', async () => {
+    await sendFailureAlert(makeEmail(), ['broken image'])
+
+    expect(mockArchive).toHaveBeenCalledWith('flyer-parse-failed', expect.stringContaining('Flyer parse failed'), expect.stringContaining('broken image'), expect.any(Array))
+    // archive happens first so the content survives a failed send
+    expect(mockArchive.mock.invocationCallOrder[0]).toBeLessThan(mockSend.mock.invocationCallOrder[0])
+  })
+
+  it('archives ops alerts with the handler-error kind', async () => {
+    await sendOpsAlert(new Error('kaboom'), 'test context')
+
+    expect(mockArchive).toHaveBeenCalledWith('handler-error', expect.stringContaining('Handler error'), expect.stringContaining('kaboom'), expect.any(Array))
   })
 })

@@ -34,10 +34,18 @@ const serverlessConfiguration: AWS = {
             Resource: 'arn:aws:s3:::${env:S3_BUCKET}/images/*'
           },
           {
-            // Drive-inbox ledger + ops-alert throttle marker
+            // Drive-inbox ledger + ops state + dedupe cache
             Effect: 'Allow',
             Action: ['s3:GetObject', 's3:PutObject'],
             Resource: 'arn:aws:s3:::${env:S3_BUCKET}/drive-inbox/*'
+          },
+          {
+            // Alert archive: every alert email is also written here so it can
+            // be looked up without forwarding emails (and survives inbound.new
+            // outages)
+            Effect: 'Allow',
+            Action: ['s3:PutObject'],
+            Resource: 'arn:aws:s3:::${env:S3_BUCKET}/alerts/*'
           },
           {
             // Required for GetObject on a MISSING key to return 404 NoSuchKey

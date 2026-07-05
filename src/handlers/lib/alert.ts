@@ -1,5 +1,6 @@
 import { Inbound } from 'inboundemail'
 import type { InboundWebhookEmail } from 'inboundemail'
+import { archiveAlert } from './alert-archive'
 import { withTimeout } from './timeout'
 
 const INBOUND_API_KEY = process.env.INBOUND_API_KEY
@@ -67,6 +68,7 @@ export async function sendFailureAlert(email: InboundWebhookEmail, reasons: stri
     ${email.parsedData?.htmlBody ?? `<pre>${escapeHtml(textBody)}</pre>`}
   `
 
+  await archiveAlert('flyer-parse-failed', `[decentered] Flyer parse failed — ${reasons.length} image(s) from ${from}`, text, to)
   await client.emails.send({
     from: ALERT_FROM,
     to,
@@ -111,6 +113,7 @@ export async function sendDriveInboxFailureAlert(failures: DriveInboxFailure[], 
   // Bounded: on the scheduled Drive-inbox path there is no API Gateway
   // ceiling backstopping a hung inbound.new call, and an unbounded send here
   // would block the ledger save that clears alertPending (duplicate alerts)
+  await archiveAlert('drive-upload-failed', `[decentered] Drive upload failed — ${failures.length} file(s) could not be processed`, text, to)
   await withTimeout(
     client.emails.send({
       from: ALERT_FROM,
@@ -167,6 +170,9 @@ export async function sendOpsAlert(error: unknown, context: string): Promise<voi
   const detail = error instanceof Error ? `${error.message}\n\n${error.stack ?? ''}` : String(error)
   const diagnosis = classifyError(error)
 
+  const opsText = [`Unhandled error (${context}). An inbound email or Drive upload may have been dropped.`, '', diagnosis, '', detail].join('\n')
+  await archiveAlert('handler-error', `[decentered] Handler error — ${context}`, opsText, OPS_ALERT_TO)
+
   // Bounded for the same reason as the Drive-inbox alert: the scheduled path
   // has no external ceiling, and this is called from catch blocks where a
   // hang would eat the rest of the Lambda budget
@@ -208,6 +214,14 @@ export async function sendDrivePollerDownAlert(error: unknown, consecutiveFailur
     ? inFlight.map(f => `  - ${f.name} (attempt ${f.attempts} of 3)`).join('\n')
     : '  (none were mid-processing — the failure is in listing/setup, not a specific file)'
 
+  const downText = [
+    `The Drive inbox poller has failed ${consecutiveFailures} polls in a row since ${firstFailureAt} (~${downMinutes} minutes).`,
+    classifyError(error),
+    'Files in flight:',
+    inFlightList,
+    detail
+  ].join('\n')
+  await archiveAlert('drive-poller-down', `[decentered] Drive poller DOWN — ${consecutiveFailures} consecutive failed polls (~${downMinutes} min)`, downText, OPS_ALERT_TO)
   await withTimeout(
     client.emails.send({
       from: ALERT_FROM,
@@ -241,6 +255,12 @@ export async function sendDrivePollerDownAlert(error: unknown, consecutiveFailur
 
 export async function sendDrivePollerRecoveredAlert(consecutiveFailures: number, firstFailureAt: string): Promise<void> {
   const downMinutes = Math.round((Date.now() - Date.parse(firstFailureAt)) / 60000)
+  await archiveAlert(
+    'drive-poller-recovered',
+    `[decentered] Drive poller recovered after ${consecutiveFailures} failed polls (~${downMinutes} min)`,
+    `Recovered after ${consecutiveFailures} consecutive failures starting ${firstFailureAt}.`,
+    OPS_ALERT_TO
+  )
   await withTimeout(
     client.emails.send({
       from: ALERT_FROM,

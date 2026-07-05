@@ -50,6 +50,11 @@ aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --
 aws s3 cp s3://$S3_BUCKET/drive-inbox/state.json - --region us-west-1   # the ledger (source of truth)
 aws cloudwatch describe-alarms --alarm-name-prefix decentered --region us-west-1 --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}' --output table
 
+# Alert archive: every alert email is also written to S3 at send time (keys
+# sort chronologically) — read these instead of asking anyone to paste emails
+aws s3 ls s3://$S3_BUCKET/alerts/ --region us-west-1
+aws s3 cp s3://$S3_BUCKET/alerts/<key> - --region us-west-1
+
 # Run the Drive poller locally against real services (careful: writes to the
 # real sheet/ledger and sends real alerts — override ALERT_EMAIL_TO and
 # ALERT_OPS_EMAIL_TO to yourself first)
