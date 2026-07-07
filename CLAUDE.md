@@ -20,7 +20,9 @@ DecenteredArts Events Extractor - A serverless application that ingests event fl
 - `src/handlers/lib/events.ts` — normalization (fills missing end times, cross-fills days)
 - `src/handlers/lib/sheets.ts` — fuzzy dedupe (Dice bigrams ≥0.75 on title/address + exact date) + exact `sourceTag` replay dedupe + append
 - `src/handlers/lib/s3.ts` — image archival (the S3 URL becomes the sheet's link column — and the Drive path's dedupe key)
-- `src/handlers/lib/alert.ts` — all email alerts via inbound.new: `sendFailureAlert` (email path, → Liz), `sendDriveInboxFailureAlert` (Drive path, → Liz), `sendOpsAlert` (→ maintainer)
+- `src/handlers/lib/alert.ts` — all email alerts via inbound.new: `sendFailureAlert` (email path, → Liz), `sendDriveInboxFailureAlert` (Drive path, → Liz), `sendOpsAlert` + poller down/recovered (→ maintainer)
+- `src/handlers/lib/alert-archive.ts` — writes every alert to S3 `alerts/` before sending (queryable, survives transport outages)
+- `src/handlers/lib/dedupe-cache.ts` — S3 fallback for the sheet dedupe index when the Sheets read fails
 - `src/handlers/lib/timeout.ts` — `withTimeout` for SDKs with no native timeout knob
 - `serverless.ts` — stack config: both functions, IAM, CloudWatch alarms + SNS
 
