@@ -13,7 +13,7 @@ DecenteredArts Events Extractor - A serverless application that ingests event fl
 ### Key Files (index)
 - `src/handlers/inbound.ts` — email-path Lambda handler (`parseInboundEmail`)
 - `src/handlers/drive-inbox.ts` — Drive-path scheduled Lambda handler (`pollDriveInbox`): orchestration, ledger state machine, failure taxonomy
-- `src/handlers/lib/drive-inbox.ts` — Drive API client, S3 ledger load/save, thumbnail-first downloads, throttled ops alerts
+- `src/handlers/lib/drive-inbox.ts` — Drive API client, S3 ledger load/save, thumbnail-first downloads, streak-based ops alerting
 - `src/handlers/lib/drive.ts` — email-path Drive-LINK extraction (public thumbnail scrape; distinct from drive-inbox.ts) + `isImageBuffer` magic-byte check
 - `src/handlers/lib/openai.ts` — GPT-5.4 vision extraction (bounded client; injects today's Pacific date into the prompt)
 - `src/handlers/lib/prompt.ts` — `buildPrompt(today)`: extraction instructions incl. relative-date resolution ("TODAY 8PM" screenshots)
@@ -42,11 +42,6 @@ pnpm vitest run src/handlers/lib/events.test.ts  # Run a single test file
 # Deployment
 pnpm deploy:prod            # Deploy to AWS Lambda (deploys to us-west-1)
 
-# Test deployed Lambda end-to-end (get URL from `pnpm deploy:prod` output)
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"event":"email.received","timestamp":"...","email":{...},"endpoint":{...}}' \
-  "<API_GATEWAY_URL>/dev/parse-inbound-email"
-
 # Drive inbox: watch runs / inspect state
 aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h --format short
 aws s3 cp s3://$S3_BUCKET/drive-inbox/state.json - --region us-west-1   # the ledger (source of truth)
@@ -57,19 +52,17 @@ aws cloudwatch describe-alarms --alarm-name-prefix decentered --region us-west-1
 aws s3 ls s3://$S3_BUCKET/alerts/ --region us-west-1
 aws s3 cp s3://$S3_BUCKET/alerts/<key> - --region us-west-1
 
-# Run the Drive poller locally against real services (careful: writes to the
-# real sheet/ledger and sends real alerts — override ALERT_EMAIL_TO and
-# ALERT_OPS_EMAIL_TO to yourself first)
-set -a && source .env && set +a && export ALERT_EMAIL_TO=<you> ALERT_OPS_EMAIL_TO=<you> \
-  && pnpm tsx -e "" # then: import { pollDriveInbox } from './src/handlers/drive-inbox' in a temp script (tsx -e cannot top-level await)
+# Run the Drive poller locally against REAL services (writes to the real
+# sheet/ledger, sends real alerts — override recipients to yourself first).
+# Env overrides must be exported BEFORE tsx runs: modules read process.env at
+# import time. Put the invocation in a temp script with async main()
+# (tsx -e cannot top-level await).
+set -a && source .env && set +a && export ALERT_EMAIL_TO=<you> ALERT_OPS_EMAIL_TO=<you> && pnpm tsx <temp-script-importing-pollDriveInbox>.ts
 ```
 
 ## Architecture
 
-### Entry Point
-`src/handlers/inbound.ts:parseInboundEmail` - Lambda handler for POST `/parse-inbound-email`
-
-### Processing Flow
+### Email path flow (`inbound.ts:parseInboundEmail`, POST `/parse-inbound-email`)
 1. Receive JSON webhook from inbound.new (`InboundWebhookPayload`)
 2. Filter for image attachments (`contentType.startsWith('image/')`)
 3. For each image attachment (in parallel):
@@ -84,17 +77,14 @@ set -a && source .env && set +a && export ALERT_EMAIL_TO=<you> ALERT_OPS_EMAIL_T
 Events have: title, address, location (SF/Oakland/Berkeley/Other), type (from fixed list), startDay/endDay (YYYY-MM-DD), startTime/endTime (HH:mm), description, cost
 
 ### Infrastructure
-- **Region:** us-west-1
-- **Lambda:** `events-parser-dev-parseInboundEmail`
-- **API Gateway timeout:** 29s (hard AWS limit) — GPT-5.4 typically responds in 11-15s
-- **S3 bucket:** set via `S3_BUCKET` env var (us-west-1). Prefixes: `images/` (public flyer archive, linked from the sheet), `drive-inbox/` (poller state — private)
-- **Spreadsheet:** ~6,900 existing rows; dedupe fetches columns A:J before appending (J = link column, carries the Drive path's exact-dedupe key)
+- **Region:** us-west-1. Functions: `events-parser-dev-parseInboundEmail` (webhook), `events-parser-dev-pollDriveInbox` (scheduled)
+- **S3 bucket:** set via `S3_BUCKET` env var. Prefixes: `images/` (public flyer archive, linked from the sheet), `drive-inbox/` (poller state — private), `alerts/` (alert archive — private)
+- **Spreadsheet:** ~7k rows; dedupe fetches columns A:J before appending (J = link column, carries the Drive path's exact-dedupe key)
 - **API Gateway:** `https://pek82om27g.execute-api.us-west-1.amazonaws.com/dev/parse-inbound-email`
-- **Logs:** `aws logs tail /aws/lambda/events-parser-dev-parseInboundEmail --region us-west-1 --since 1h --format short`
 - **Inbound email:** inbound.new — email at `events.proteus.tools`, webhook posts JSON with attachment download URLs
 
-### Important Constraints
-- API Gateway has a hard 29s timeout. GPT-4o was too slow (~31s), which is why we use GPT-5.4 (~13s). Do not switch back to GPT-4o.
+### Important Constraints (email path)
+- API Gateway has a hard 29s timeout. GPT-5.4 runs 3-7s/image; GPT-4o was too slow (~31s) — do not switch back to GPT-4o.
 - inbound.new retries failed webhooks with exponential backoff. Dedupe logic prevents duplicate rows from retries.
 - Images can be flyers, social media screenshots (LinkedIn, Instagram), posters, etc. — the prompt must handle all formats.
 - The prompt in `lib/prompt.ts` must explicitly instruct the model to extract ALL events from images with multiple events (e.g. workshop series). Without this, the model may collapse them into one.
@@ -107,18 +97,16 @@ Liz drops flyer files into the shared Drive folder **"Decentered Uploads"** (`DR
 - **Attempts are PRE-bumped** in the ledger before any download/GPT call so crashes (timeout, OOM) still count toward the 3-attempt cap. If the pre-bump save fails, the run aborts — processing without bookkeeping is unbounded GPT respend. Max 10 files per run.
 - **Downloads are thumbnail-first** (authenticated `thumbnailLink` rewritten to `=s2000`): Drive transcodes HEIC and renders PDF page 1, so those formats work without native deps. Raw `alt=media` only for OpenAI-native formats ≤15MB when no thumbnail exists yet (generation lags upload — that error is transient by design). Never trust HTTP 200 alone; magic-byte check everything.
 - **Exact crash-replay dedupe:** the S3 key embeds `drive_<fileId>_`, and `addEventsToSpreadsheet` skips any group whose `sourceTag` appears in an existing row's link column (fuzzy dedupe provably leaks: date-less events bypass it, and GPT re-extraction drifts). Three things protect this guarantee — do not weaken them: (1) a failed dedupe read-back THROWS when any group carries a sourceTag (email path stays fail-open for availability); (2) an S3 upload failure FAILS the file as transient rather than appending rows with an empty link column (the link IS the dedupe key); (3) the read-back includes rows whose date+title are empty but link is not.
-- **IAM requires `s3:ListBucket` on the bucket** — without it, GetObject on the missing `drive-inbox/state.json` returns 403 AccessDenied instead of 404 NoSuchKey and first-run bootstrap bricks the poller. `loadLedger` throws a diagnostic error for this case rather than guessing empty (guessing would reset attempts → unbounded GPT respend if the ledger exists but GET is denied).
+- **IAM requires `s3:ListBucket` on the bucket** — without it, GetObject on the missing `drive-inbox/state.json` returns 403 AccessDenied instead of 404 NoSuchKey and first-run bootstrap bricks the poller. `loadLedger` throws a diagnostic error for this case rather than guessing empty (an existing-but-unreadable ledger treated as empty would reset all attempts).
 - **Failure taxonomy:** transient errors retry naturally next poll (no state change beyond attempts); permanent (folder dragged in, attempts exhausted) → mark `failed` + `alertPending` in ledger FIRST, then alert Liz (`sendDriveInboxFailureAlert`), then clear the flag — at-least-once alerting with no 5-minute alert loop. Ledger pruning preserves `failed`+`alertPending` entries even after the file leaves the inbox (the alert is owed to a human; pending alerts are sourced from the ledger, not the listing). Failed files deliberately stay in the inbox; the fix is always "upload a fresh copy" (a file edited in place after processing is intentionally NOT reprocessed — the ledger keys on fileId).
 - **Dedupe fallback cache** (`s3://$S3_BUCKET/drive-inbox/dedupe-cache.json`): the sheet is ALWAYS read fresh per append (manual sheet edits respected) and the normalized index is written back to S3 on every successful read and after every append. When the sheet read fails (Sheets tail latency), the cache — at most minutes stale, hard 24h cap — is used instead of aborting (Drive path) or going dedupe-blind (email path). The post-append cache update is what keeps sourceTag replay protection alive when a crash-replay's read also fails.
 - **Ops alerts fire on PERSISTENCE, not occurrence** (`drive-inbox/ops-state.json`): a single failed poll emails nobody — the next tick is the retry. Three consecutive failures (~15 min, matching the CloudWatch alarm) send one rich email (streak length, in-flight files + attempts, what happens automatically); re-alerts capped at one per 6h; a recovery email closes the loop when polls succeed again. Fail-open: if the streak state itself is unreadable, alert immediately. `recordPollSuccess()` must be called on every successful run — including idle ones — or streaks never clear.
 - **Watcher-independent alarms** (CloudFormation resources in `serverless.ts`, SNS topic `decentered-ops-alarms` → Faizan's email): Lambda crash alarms for both functions, a log-metric-filter alarm on the poller's top-level catch (fires even when inbound.new — the in-code alert channel — is what's down), and a heartbeat alarm (poller <6 invocations/hour, missing data = breaching). The in-code email alerts ride on inbound.new and go silent exactly when it fails; these don't.
-- **Every alert email is also archived to `s3://$S3_BUCKET/alerts/<ISO-ts>_<kind>.json` BEFORE sending** (`lib/alert-archive.ts`) — look alerts up there instead of asking a human to paste emails, and note the archive survives inbound.new outages. Kinds: `flyer-parse-failed`, `drive-upload-failed`, `handler-error`, `drive-poller-down`, `drive-poller-recovered`.
-- **Logs:** `aws logs tail /aws/lambda/events-parser-dev-pollDriveInbox --region us-west-1 --since 1h --format short`
-- Grep-able outcome line per run: `Drive inbox poll complete: X processed, Y retrying, Z failed permanently` (or `nothing to do`).
+- **Every alert email is also archived to `s3://$S3_BUCKET/alerts/<ISO-ts>_<kind>.json` BEFORE sending** (`lib/alert-archive.ts`) — look alerts up there instead of asking a human to paste emails; the archive survives inbound.new outages. Kinds: `flyer-parse-failed`, `drive-upload-failed`, `handler-error`, `drive-poller-down`, `drive-poller-recovered`.
 
 ### Current status & parked work (July 2026)
 - The Drive inbox is the PRIMARY path: since its launch (July 4 2026) the email path has received ~zero traffic — treat email as the fallback, but keep it working.
-- Healthy-day baseline for eyeballing regressions: the poller runs exactly 288×/day (12/hour heartbeat), idle ticks ~250-350ms at ~470MB; a 6-file batch (downloads + parallel GPT + dedupe against ~7k rows + appends + moves) ~11s. The webhook path's GPT calls run 3-7s/image.
+- Healthy-day baseline for eyeballing regressions: the poller runs exactly 288×/day (12/hour heartbeat), idle ticks ~250-350ms at ~470MB; a 6-file batch (downloads + parallel GPT + dedupe against ~7k rows + appends + moves) ~11s.
 - **Parked branch `ses-migration`** (local, unpushed as of July 2026): a complete, E2E-verified SES-native email receiving stack on `ses.proteus.tools` that bypasses inbound.new's ~28MB ingestion ceiling (raw MIME → S3 → us-west-2 Lambda, no API Gateway). Built before the Drive inbox existed; deprioritized once Drive became primary since large batches no longer flow through email. If revived: it forked from `c250c42` and also touches `alert.ts` + CLAUDE.md, so it needs a careful rebase; its CLAUDE.md documents an MX-cutover runbook where ORDER MATTERS (receipt-rule recipients BEFORE the MX flip).
 
 ### Environment Variables
@@ -192,7 +180,7 @@ Debugging playbook, in order:
    - *`Error polling Drive inbox` every tick*: dependency down. `403 Drive API has not been used` = API disabled on the GCP project; `Ledger GET AccessDenied` = role lost `s3:ListBucket` (see hardening invariants); Sheets errors surface here only when BOTH the sheet read and the dedupe cache fallback are unavailable (a lone Sheets timeout logs `falling back to cached index` and the run proceeds).
    - *Got a "Drive poller DOWN" email*: ≥3 consecutive polls failed (~15+ min) — a real outage, not a blip. After it recovers (recovery email), check the ledger for files whose attempts were burned by the outage (`status: failed`) and delete their entries to reprocess without asking Liz to re-upload.
 
-4. **Alerting expectations:** Liz-actionable failures (3 attempts exhausted, folders dragged in) email her + Faizan once, at-least-once semantics via `alertPending`. Unexpected errors email Faizan only, throttled to 1/6h (S3 marker `drive-inbox/last-ops-alert.json`). CloudWatch alarms (SNS `decentered-ops-alarms`) fire independently of inbound.new: crashes, sustained poll failures, heartbeat.
+4. **Alerting expectations:** Liz-actionable failures (3 attempts exhausted, folders dragged in) email her + Faizan once, at-least-once semantics via `alertPending`. Unexpected errors email Faizan only after 3 CONSECUTIVE failed polls (streak state in `drive-inbox/ops-state.json`; recovery email on heal — see the Drive inbox section). CloudWatch alarms (SNS `decentered-ops-alarms`) fire independently of inbound.new: crashes, sustained poll failures, heartbeat. Every alert is archived under `alerts/` regardless of send outcome.
    **Testing caution:** alert recipients are LIVE (Liz gets failure alerts). For any test that exercises failure paths, override `ALERT_EMAIL_TO`/`ALERT_OPS_EMAIL_TO` on the function first and VERIFY restoration after — CloudFormation does not reliably revert manual env drift.
 
 5. **Empirical Drive API facts (verified July 2026, consumer Google account + service account):**
