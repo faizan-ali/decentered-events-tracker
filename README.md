@@ -14,40 +14,53 @@ DecenteredArts is a nonprofit organization dedicated to tracking and centralizin
 ## What This Does
 
 **For Non-Technical Users:**
-Instead of manually copying event details from Instagram posts into a spreadsheet, team members can now simply:
-1. Take a screenshot of an Instagram event flyer
-2. Forward it to a special email address
-3. The system automatically reads the image and adds the event to the tracker
+Instead of manually copying event details from Instagram posts into a spreadsheet, team members simply:
+1. Take a screenshot of an event flyer (or save the image/PDF)
+2. Drop it into a shared Google Drive folder — or email it to a special address
+3. The system automatically reads the image and adds the event to the tracker within minutes. Files that were picked up move to a "processed" subfolder; anything that can't be processed triggers a friendly email explaining what to fix.
 
 **For Technical Users:**
-This serverless application processes inbound emails via [inbound.new](https://inbound.new), uses OpenAI's GPT-5.4 vision model to extract structured event data from image attachments, and automatically populates a Google Sheets tracker.
+This serverless application ingests flyer images through two paths — a polled Google Drive folder (primary) and inbound email via [inbound.new](https://inbound.new) — then uses OpenAI's GPT-5.4 vision model to extract structured event data and populates a Google Sheets tracker, with multi-layer deduplication across both paths.
 
 ## Architecture & Workflow
 
+Two ingestion paths feed one shared extraction pipeline:
+
 ```
-Instagram Screenshot → Email Forward → inbound.new Webhook → AWS Lambda → Download Attachments → OpenAI Vision API → Google Sheets
-                                                                                    ↓
-                                                                                 AWS S3 Storage
+PRIMARY  Flyer/PDF → shared Drive folder → EventBridge (5 min) → Lambda poller ─┐
+                                                                                ├→ OpenAI Vision → dedupe → Google Sheets
+FALLBACK Screenshot → Email Forward → inbound.new Webhook → API Gateway Lambda ─┘
+                                                                                └→ AWS S3 (archival + pipeline state)
 ```
 
-1. **Email Ingestion**: inbound.new receives forwarded emails and posts a JSON webhook
-2. **Attachment Download**: Lambda downloads image attachments via authenticated URLs
-3. **File Storage**: Images are uploaded to AWS S3 for archival
-4. **AI Extraction**: OpenAI GPT-5.4 vision model analyzes images and extracts event details
-5. **Spreadsheet Update**: Extracted data is automatically added to Google Sheets tracker
+**Drive inbox path (primary, July 2026):**
+1. A team member drops images/PDFs into a Google Drive folder shared with a service account
+2. A scheduled Lambda polls every 5 minutes, downloading bounded-resolution thumbnails (which makes HEIC photos and PDF flyers work for free)
+3. An S3 ledger — not Drive state — is the source of truth for what's been processed, with pre-counted attempts bounding retry cost even across crashes
+4. Processed files move to a `processed/` subfolder as visible feedback; failures alert the uploader by email after 3 attempts
 
-> **Note**: This project previously used SendGrid Inbound Parse for email ingestion. It was replaced with inbound.new in March 2026 for better developer experience and lower cost.
+**Email path (fallback):**
+1. inbound.new receives forwarded emails and posts a JSON webhook
+2. Lambda downloads image attachments (or public Google Drive links found in the body) via authenticated URLs
+
+**Shared pipeline:**
+- Images archived to S3; GPT-5.4 vision extracts structured event data (the prompt is anchored with today's date so "TONIGHT 8PM" screenshots resolve to real dates)
+- Two-layer dedupe before appending: exact per-source-file replay protection, plus fuzzy matching (bigram similarity on title/address + exact date) that catches the same event arriving via different flyers — or different paths
+- A cached dedupe index makes appends resilient to spreadsheet-API latency; failures alert on persistence (consecutive-failure streaks with recovery notifications), not one-off blips, with CloudWatch alarms as an independent backstop and every alert archived to S3
+
+> **History**: email ingestion originally used SendGrid Inbound Parse, replaced with inbound.new in March 2026; the Drive folder became the primary path in July 2026 after email-provider size ceilings kept silently dropping large flyer batches.
 
 ## Technologies Used
 
 - **Runtime**: Node.js with TypeScript
-- **Cloud Platform**: AWS Lambda (Serverless)
+- **Cloud Platform**: AWS Lambda + EventBridge schedules + CloudWatch alarms/SNS (Serverless)
+- **File Ingestion**: Google Drive API (polled shared folder)
 - **Email Processing**: [inbound.new](https://inbound.new)
 - **AI Vision**: OpenAI GPT-5.4
-- **Storage**: AWS S3
+- **Storage**: AWS S3 (image archive + ledger/cache/alert-archive state)
 - **Spreadsheet**: Google Sheets API
 - **Framework**: Serverless Framework
-- **Code Quality**: Biome (linting & formatting)
+- **Code Quality**: Biome (linting & formatting), Vitest (250+ tests)
 
 ### Key Dependencies
 - `openai` - GPT-5.4 vision API integration
